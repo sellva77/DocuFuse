@@ -1,0 +1,29 @@
+node_modules/
+dist/
+dist-electron/
+release/
+
+# Test-generated files
+tests/_temp_placement/
+tests/output/
+
+# Compiled signing bridge artifacts
+signing-bridge/*.class
+signing-bridge/SigningBridge.exe
+
+# Tool caches and temporary files
+.vite/
+coverage/
+*.tmp
+*.temp
+
+# Package manager logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+*.log
+.env
+.DS_Store
+Thumbs.db
