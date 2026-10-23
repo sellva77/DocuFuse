@@ -164,6 +164,13 @@ export class SignatureVerifier {
       // Check 5: Signing Time
       const signingTimeStr = parsedPkcs7.signingTime ? parsedPkcs7.signingTime.toISOString() : (metadata.signingTime || null);
 
+      // Check 6: PAdES Compliance (ETSI EN 319 142 / eIDAS)
+      const isPades = metadata.subFilter === 'ETSI.CAdES.detached';
+      const hasSigningCertV2 = Boolean(parsedPkcs7.hasSigningCertV2);
+      const padesProfile = isPades
+        ? (hasSigningCertV2 ? 'PAdES-B-B (ETSI EN 319 142-1 Baseline)' : 'PAdES-BES')
+        : 'Legacy PKCS#7 Detached';
+
       const isValid = digestMatch && signatureValid && certDatesValid;
 
       return {
@@ -177,6 +184,14 @@ export class SignatureVerifier {
         notYetValid,
         trustStatus,
         trustDetails,
+        // PAdES / eIDAS compliance details
+        pades: {
+          isPades,
+          profile: padesProfile,
+          subFilter: metadata.subFilter || 'adbe.pkcs7.detached',
+          hasSigningCertificateV2: hasSigningCertV2,
+          eidasCompliant: isPades && hasSigningCertV2,
+        },
         // Detailed signer info
         signer: {
           commonName: parseCN(certX509.subject),
@@ -194,6 +209,7 @@ export class SignatureVerifier {
           location: metadata.location || 'Not specified',
           contactInfo: metadata.contactInfo || 'Not specified',
           signingTime: signingTimeStr,
+          subFilter: metadata.subFilter,
         },
         technical: {
           byteRange,
@@ -201,6 +217,7 @@ export class SignatureVerifier {
           signedDigestHex: parsedPkcs7.messageDigest.toString('hex'),
           signatureHex: parsedPkcs7.signatureBytes.toString('hex').substring(0, 64) + '...',
           algorithm: 'SHA256withRSA',
+          format: padesProfile,
         },
       };
     } catch (parseErr) {
@@ -292,8 +309,8 @@ function parsePkcs7SignedData(pkcs7Der) {
     signedAttrsTlv.value,
   ]);
 
-  // Parse signed attributes to extract messageDigest and signingTime
-  const { messageDigest, signingTime } = parseSignedAttributes(signedAttrsTlv.value);
+  // Parse signed attributes to extract messageDigest, signingTime, and hasSigningCertV2
+  const { messageDigest, signingTime, hasSigningCertV2 } = parseSignedAttributes(signedAttrsTlv.value);
 
   return {
     signerCertDer,
@@ -301,6 +318,7 @@ function parsePkcs7SignedData(pkcs7Der) {
     signatureBytes,
     messageDigest,
     signingTime,
+    hasSigningCertV2,
   };
 }
 
@@ -312,12 +330,13 @@ function encodeLengthFromTLV(tlv) {
 }
 
 /**
- * Parse the signed attributes buffer to find messageDigest and signingTime
+ * Parse the signed attributes buffer to find messageDigest, signingTime, and signingCertificateV2
  */
 function parseSignedAttributes(attrsBuf) {
   let offset = 0;
   let messageDigest = null;
   let signingTime = null;
+  let hasSigningCertV2 = false;
 
   while (offset < attrsBuf.length) {
     try {
@@ -349,13 +368,15 @@ function parseSignedAttributes(attrsBuf) {
           const sec = parseInt(timeStr.substring(10, 12), 10);
           signingTime = new Date(Date.UTC(fullYear, month, day, hour, min, sec));
         }
+      } else if (oid === OIDS.SIGNING_CERTIFICATE_V2) {
+        hasSigningCertV2 = true;
       }
     } catch (_) {
       break;
     }
   }
 
-  return { messageDigest, signingTime };
+  return { messageDigest, signingTime, hasSigningCertV2 };
 }
 
 /**
@@ -371,11 +392,14 @@ function extractPdfSigMetadata(pdfStr, searchStart) {
     return m ? m[1].replace(/\\([()\\])/g, '$1') : null;
   };
 
+  const subFilterMatch = windowStr.match(/\/SubFilter\s*\/([a-zA-Z0-9._]+)/);
+
   return {
     reason: extractField('Reason'),
     location: extractField('Location'),
     contactInfo: extractField('ContactInfo'),
     signingTime: extractField('M'),
+    subFilter: subFilterMatch ? subFilterMatch[1] : null,
   };
 }
 

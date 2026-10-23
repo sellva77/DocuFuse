@@ -478,8 +478,8 @@ async function mergeToDocx(fileInfos, outputPath, tempDir, progress) {
   progress('Saving', 'Writing output DOCX...', 92);
 
   const doc = new Document({
-    creator: 'Document Merger',
-    description: 'Merged document created by Document Merger',
+    creator: 'DocuFuse',
+    description: 'Merged document created by DocuFuse',
     title: 'Merged Document',
     sections: [
       {

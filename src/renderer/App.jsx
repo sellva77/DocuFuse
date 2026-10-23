@@ -7,15 +7,35 @@ import ProgressOverlay from './components/ProgressOverlay';
 import Notification from './components/Notification';
 import ExcelConverter from './components/ExcelConverter';
 import DigitalSignature from './components/DigitalSignature';
+import MergePdfPreview from './components/MergePdfPreview';
 import { Icons } from './components/Icons';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('merge'); // 'merge' | 'excel'
   const [files, setFiles] = useState([]);
+  const [activePreviewIndex, setActivePreviewIndex] = useState(0);
+  const [previewModal, setPreviewModal] = useState({
+    isOpen: false,
+    fileIndex: 0,
+    mode: 'document',
+  });
   const [outputFormat, setOutputFormat] = useState('pdf');
   const [isMerging, setIsMerging] = useState(false);
   const [progress, setProgress] = useState(null);
   const [notification, setNotification] = useState(null);
+
+  const handleOpenPreview = useCallback((index = 0, mode = 'document') => {
+    setActivePreviewIndex(index);
+    setPreviewModal({
+      isOpen: true,
+      fileIndex: index,
+      mode,
+    });
+  }, []);
+
+  const handleClosePreview = useCallback(() => {
+    setPreviewModal(prev => ({ ...prev, isOpen: false }));
+  }, []);
 
   // Listen for merge progress from main process
   useEffect(() => {
@@ -148,7 +168,7 @@ export default function App() {
         <div className="app-content">
           {/* Header with Tab Navigation */}
           <header className="app-header">
-            <h1>Document Merger</h1>
+            <h1>DocuFuse</h1>
             <div className="app-tab-bar" id="app-tab-bar">
               <button
                 className={`app-tab ${activeTab === 'merge' ? 'active' : ''}`}
@@ -186,6 +206,9 @@ export default function App() {
               {/* File List */}
               <FileList
                 files={files}
+                activePreviewIndex={activePreviewIndex}
+                onSelectPreview={setActivePreviewIndex}
+                onOpenPreview={handleOpenPreview}
                 onRemove={handleRemoveFile}
                 onClear={handleClearAll}
                 onReorder={handleReorder}
@@ -197,6 +220,7 @@ export default function App() {
                   outputFormat={outputFormat}
                   onFormatChange={handleFormatChange}
                   onMerge={handleMerge}
+                  onPreview={() => handleOpenPreview(activePreviewIndex, 'sequence')}
                   canMerge={canMerge}
                   isMerging={isMerging}
                 />
@@ -213,6 +237,22 @@ export default function App() {
           )}
         </div>
       </div>
+
+      {/* PDF Preview Modal */}
+      {previewModal.isOpen && files.length > 0 && (
+        <MergePdfPreview
+          isModal={true}
+          isOpen={previewModal.isOpen}
+          onClose={handleClosePreview}
+          files={files}
+          activeFileIndex={previewModal.fileIndex}
+          initialMode={previewModal.mode}
+          onSelectFile={(idx) => {
+            setActivePreviewIndex(idx);
+            setPreviewModal(prev => ({ ...prev, fileIndex: idx }));
+          }}
+        />
+      )}
 
       {/* Progress Overlay */}
       {isMerging && <ProgressOverlay progress={progress} />}

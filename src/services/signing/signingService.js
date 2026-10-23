@@ -55,6 +55,7 @@ export async function signDocument({
   visibleSignature = true,
   appearance = {},
   onProgress = () => {},
+  signingSession = null,
 }) {
   // 1. Validate inputs
   if (typeof inputPath !== 'string' || !inputPath.trim()) {
@@ -99,7 +100,7 @@ export async function signDocument({
   // 4. Resolve provider and certificate
   onProgress({ step: 'Connecting', detail: 'Accessing cryptographic provider and certificate...', percent: 30 });
 
-  const provider = getCertificateProvider(providerId);
+  const provider = signingSession || getCertificateProvider(providerId);
 
   // Use pre-fetched certificate info if available, otherwise re-discover.
   // Pre-fetched info avoids race conditions where the smart card driver may not
@@ -107,14 +108,23 @@ export async function signDocument({
   // and the private key is accessible for signing (which triggers the PIN prompt).
   let certInfo = null;
   if (passedCertInfo && (passedCertInfo.alias || passedCertInfo.id)) {
-    certInfo = passedCertInfo;
-  } else {
-    const certList = await provider.discoverCertificates();
-    certInfo = certList.find(c => c.id === certificateId || c.alias === certificateId);
+    certInfo = { ...passedCertInfo };
+  }
+
+  // Ensure certDerBase64 is available. If missing, look up from provider.discoverCertificates()
+  if (!certInfo || !certInfo.certDerBase64) {
+    const certList = await (signingSession ? getCertificateProvider(providerId) : provider).discoverCertificates();
+    const found = certList.find(c => c.id === certificateId || c.alias === certificateId || (certInfo && (c.id === certInfo.id || c.alias === certInfo.alias)));
+    if (found) {
+      certInfo = { ...found, ...(certInfo || {}) };
+      if (!certInfo.certDerBase64 && found.certDerBase64) {
+        certInfo.certDerBase64 = found.certDerBase64;
+      }
+    }
   }
 
   if (!certInfo) {
-    throw new Error(`Selected certificate (${certificateId}) is not available in provider ${provider.name}. Please reconnect your token.`);
+    throw new Error(`Selected certificate (${certificateId}) is not available in provider ${provider.name || providerId}. Please reconnect your token.`);
   }
 
   if (!certInfo.hasPrivateKey) {
@@ -126,10 +136,15 @@ export async function signDocument({
   }
 
   // 5. Perform PDF Signing
+  const isFirstOfSession = !signingSession || signingSession._hasPrompted !== true;
+  if (signingSession) signingSession._hasPrompted = true;
+
   onProgress({
     step: 'Signing',
     detail: certInfo.isHardwareToken
-      ? 'Awaiting token authentication (please enter PIN in the hardware prompt if requested)...'
+      ? (isFirstOfSession
+          ? 'Awaiting token authentication (please enter PIN in the hardware prompt if requested)...'
+          : 'Signing document with authenticated token session...')
       : 'Generating cryptographic signature...',
     percent: 60,
   });

@@ -26,7 +26,15 @@ function getIconLabel(ext) {
   }
 }
 
-export default function FileList({ files, onRemove, onClear, onReorder }) {
+export default function FileList({
+  files,
+  activePreviewIndex = 0,
+  onSelectPreview,
+  onOpenPreview,
+  onRemove,
+  onClear,
+  onReorder,
+}) {
   const [dragIndex, setDragIndex] = useState(null);
   const [dragOverIndex, setDragOverIndex] = useState(null);
   const dragItem = useRef(null);
@@ -56,11 +64,22 @@ export default function FileList({ files, onRemove, onClear, onReorder }) {
     const fromIndex = dragItem.current;
     if (fromIndex !== null && fromIndex !== dropIndex) {
       onReorder(fromIndex, dropIndex);
+      if (activePreviewIndex === fromIndex) {
+        onSelectPreview?.(dropIndex);
+      }
     }
     setDragIndex(null);
     setDragOverIndex(null);
     dragItem.current = null;
-  }, [onReorder]);
+  }, [onReorder, activePreviewIndex, onSelectPreview]);
+
+  const handleFileClick = useCallback((index) => {
+    if (onOpenPreview) {
+      onOpenPreview(index);
+    } else {
+      onSelectPreview?.(index);
+    }
+  }, [onOpenPreview, onSelectPreview]);
 
   if (files.length === 0) return null;
 
@@ -78,65 +97,88 @@ export default function FileList({ files, onRemove, onClear, onReorder }) {
       </div>
 
       <div className="file-list" role="list" aria-label="Selected files">
-        {files.map((file, index) => (
-          <div
-            key={`${file.path}-${index}`}
-            className={`file-item ${dragIndex === index ? 'dragging-item' : ''} ${dragOverIndex === index ? 'drag-over' : ''}`}
-            draggable
-            onDragStart={(e) => handleDragStart(e, index)}
-            onDragOver={(e) => handleDragOver(e, index)}
-            onDragEnd={handleDragEnd}
-            onDrop={(e) => handleDrop(e, index)}
-            role="listitem"
-            aria-label={`File ${index + 1}: ${file.name}`}
-          >
-            {/* Drag handle */}
-            <div className="file-item-drag-handle" aria-label="Drag to reorder">
-              <div className="drag-dot-row">
-                <span className="drag-dot" /><span className="drag-dot" />
-              </div>
-              <div className="drag-dot-row">
-                <span className="drag-dot" /><span className="drag-dot" />
-              </div>
-              <div className="drag-dot-row">
-                <span className="drag-dot" /><span className="drag-dot" />
-              </div>
-            </div>
+        {files.map((file, index) => {
+          const isActivelyPreviewed = activePreviewIndex === index;
 
-            {/* Order number */}
-            <div className="file-item-order">{index + 1}</div>
-
-            {/* File type icon */}
-            <div className={`file-item-icon ${getIconClass(file.extension)}`}>
-              {getIconLabel(file.extension)}
-            </div>
-
-            {/* File info */}
-            <div className="file-item-info">
-              <div className="file-item-name" title={file.name}>{file.name}</div>
-              <div className="file-item-meta">
-                <span>{file.type}</span>
-                <span className="dot" />
-                <span>{formatFileSize(file.size)}</span>
-              </div>
-            </div>
-
-            {/* Status */}
-            <span className={`file-item-status ${file.error ? 'error' : 'ready'}`}>
-              {file.error ? 'Error' : 'Ready'}
-            </span>
-
-            {/* Remove button */}
-            <button
-              className="btn-remove"
-              onClick={() => onRemove(index)}
-              aria-label={`Remove ${file.name}`}
-              id={`btn-remove-${index}`}
+          return (
+            <div
+              key={`${file.path}-${index}`}
+              className={`file-item ${dragIndex === index ? 'dragging-item' : ''} ${dragOverIndex === index ? 'drag-over' : ''} ${isActivelyPreviewed ? 'active-preview' : ''}`}
+              draggable
+              onDragStart={(e) => handleDragStart(e, index)}
+              onDragOver={(e) => handleDragOver(e, index)}
+              onDragEnd={handleDragEnd}
+              onDrop={(e) => handleDrop(e, index)}
+              onClick={() => handleFileClick(index)}
+              role="listitem"
+              aria-label={`File ${index + 1}: ${file.name}`}
             >
-              <Icons.X />
-            </button>
-          </div>
-        ))}
+              {/* Drag handle */}
+              <div className="file-item-drag-handle" aria-label="Drag to reorder" onClick={(e) => e.stopPropagation()}>
+                <div className="drag-dot-row">
+                  <span className="drag-dot" /><span className="drag-dot" />
+                </div>
+                <div className="drag-dot-row">
+                  <span className="drag-dot" /><span className="drag-dot" />
+                </div>
+                <div className="drag-dot-row">
+                  <span className="drag-dot" /><span className="drag-dot" />
+                </div>
+              </div>
+
+              {/* Order number */}
+              <div className="file-item-order">{index + 1}</div>
+
+              {/* File type icon */}
+              <div className={`file-item-icon ${getIconClass(file.extension)}`}>
+                {getIconLabel(file.extension)}
+              </div>
+
+              {/* File info */}
+              <div className="file-item-info">
+                <div className="file-item-name" title={file.name}>{file.name}</div>
+                <div className="file-item-meta">
+                  <span>{file.type}</span>
+                  <span className="dot" />
+                  <span>{formatFileSize(file.size)}</span>
+                </div>
+              </div>
+
+              {/* Preview Quick Button */}
+              <button
+                type="button"
+                className={`btn-file-preview ${isActivelyPreviewed ? 'active' : ''}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleFileClick(index);
+                }}
+                title={`Preview ${file.name}`}
+                aria-label={`Preview ${file.name}`}
+              >
+                <Icons.Eye />
+                <span>Preview</span>
+              </button>
+
+              {/* Status */}
+              <span className={`file-item-status ${file.error ? 'error' : 'ready'}`}>
+                {file.error ? 'Error' : 'Ready'}
+              </span>
+
+              {/* Remove button */}
+              <button
+                className="btn-remove"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRemove(index);
+                }}
+                aria-label={`Remove ${file.name}`}
+                id={`btn-remove-${index}`}
+              >
+                <Icons.X />
+              </button>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

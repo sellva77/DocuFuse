@@ -35,6 +35,19 @@ export class BaseCertificateProvider {
   async signData(aliasOrId, dataBuffer) {
     throw new Error('signData must be implemented by subclass');
   }
+
+  async createSession(alias) {
+    const self = this;
+    return {
+      isSession: true,
+      alias,
+      async signData(targetAlias, dataBuffer) {
+        const buf = Buffer.isBuffer(targetAlias) ? targetAlias : dataBuffer;
+        return await self.signData(alias, buf);
+      },
+      async close() {},
+    };
+  }
 }
 
 /**
@@ -345,6 +358,162 @@ export class WindowsStoreProvider extends BaseCertificateProvider {
       algorithm: result.algorithm || 'SHA256withRSA',
     };
   }
+
+  async createSession(alias) {
+    if (!alias) throw new Error('Certificate alias is required to create a signing session');
+    const bridge = getSigningBridgePath();
+    if (!bridge) {
+      throw new Error('SigningBridge component not found. Please ensure Windows signing bridge is packaged.');
+    }
+
+    let spawnCmd = '';
+    let cmdArgs = [];
+    if (bridge.type === 'native') {
+      spawnCmd = bridge.path;
+      cmdArgs = ['session', alias];
+    } else if (bridge.type === 'powershell') {
+      spawnCmd = 'powershell.exe';
+      cmdArgs = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', bridge.path, 'session', alias];
+    } else if (bridge.type === 'jar' || bridge.type === 'class') {
+      spawnCmd = process.env.JAVA_HOME ? path.join(process.env.JAVA_HOME, 'bin', 'java.exe') : 'java';
+      cmdArgs = ['-cp', bridge.path, 'SigningBridge', 'session', alias];
+    }
+
+    const child = spawn(spawnCmd, cmdArgs, {
+      windowsHide: false,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    let stdoutBuffer = '';
+    let pendingResolve = null;
+    let pendingReject = null;
+    let isReady = false;
+    let readyDetails = null;
+
+    const session = {
+      isSession: true,
+      alias,
+      child,
+      async signData(targetAlias, dataBuffer) {
+        const buf = Buffer.isBuffer(targetAlias) ? targetAlias : dataBuffer;
+        if (!Buffer.isBuffer(buf)) throw new Error('Data buffer is required for signing');
+        if (!child || child.killed || child.exitCode !== null) {
+          throw new Error('Signing session is not active or has terminated.');
+        }
+
+        const dataBase64 = buf.toString('base64');
+        return new Promise((resolve, reject) => {
+          pendingResolve = resolve;
+          pendingReject = reject;
+          try {
+            child.stdin.write(JSON.stringify({ cmd: 'sign', dataBase64 }) + '\n');
+          } catch (err) {
+            pendingResolve = null;
+            pendingReject = null;
+            reject(err);
+          }
+        });
+      },
+      async close() {
+        if (!child || child.killed || child.exitCode !== null) return;
+        return new Promise((resolve) => {
+          const timeout = setTimeout(() => {
+            try { child.kill(); } catch (_) {}
+            resolve();
+          }, 3000);
+
+          child.once('close', () => {
+            clearTimeout(timeout);
+            resolve();
+          });
+
+          try {
+            child.stdin.write(JSON.stringify({ cmd: 'close' }) + '\n');
+          } catch (_) {
+            try { child.kill(); } catch (_) {}
+            resolve();
+          }
+        });
+      },
+    };
+
+    return new Promise((resolve, reject) => {
+      const initTimer = setTimeout(() => {
+        try { child.kill(); } catch (_) {}
+        reject(new Error('Signing session initialization timed out'));
+      }, 30000);
+
+      child.stdout.on('data', (chunk) => {
+        stdoutBuffer += chunk.toString('utf8');
+        const lines = stdoutBuffer.split('\n');
+        stdoutBuffer = lines.pop();
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const parsed = JSON.parse(trimmed);
+            if (!isReady && parsed.sessionReady) {
+              isReady = true;
+              readyDetails = parsed;
+              clearTimeout(initTimer);
+              resolve(session);
+            } else if (parsed.signatureBase64) {
+              if (pendingResolve) {
+                const res = {
+                  signatureBuffer: Buffer.from(parsed.signatureBase64, 'base64'),
+                  certDerBuffer: parsed.certBase64 ? Buffer.from(parsed.certBase64, 'base64') : (readyDetails?.certBase64 ? Buffer.from(readyDetails.certBase64, 'base64') : null),
+                  algorithm: parsed.algorithm || 'SHA256withRSA',
+                };
+                const cb = pendingResolve;
+                pendingResolve = null;
+                pendingReject = null;
+                cb(res);
+              }
+            } else if (parsed.success === false) {
+              if (pendingReject) {
+                const errCb = pendingReject;
+                pendingResolve = null;
+                pendingReject = null;
+                errCb(new Error(parsed.error || 'Signing session error'));
+              } else if (!isReady) {
+                clearTimeout(initTimer);
+                reject(new Error(parsed.error || 'Failed to initialize signing session'));
+              }
+            }
+          } catch (_) {
+            // Ignore non-JSON output
+          }
+        }
+      });
+
+      child.stderr.on('data', (errChunk) => {
+        console.warn('Signing session stderr:', errChunk.toString('utf8'));
+      });
+
+      child.on('error', (err) => {
+        clearTimeout(initTimer);
+        if (pendingReject) {
+          const errCb = pendingReject;
+          pendingResolve = null;
+          pendingReject = null;
+          errCb(err);
+        } else {
+          reject(err);
+        }
+      });
+
+      child.on('close', (code) => {
+        clearTimeout(initTimer);
+        if (pendingReject) {
+          const errCb = pendingReject;
+          pendingResolve = null;
+          pendingReject = null;
+          errCb(new Error(`Signing session terminated with code ${code}`));
+        }
+      });
+    });
+  }
 }
 
 /**
@@ -435,6 +604,20 @@ export class SoftwareTestProvider extends BaseCertificateProvider {
       signatureBuffer,
       certDerBuffer: certDer,
       algorithm: 'SHA256withRSA',
+    };
+  }
+
+  async createSession(alias) {
+    const self = this;
+    const { keyPair, certDer } = await this.getOrCreateTestCert();
+    return {
+      isSession: true,
+      alias: alias || 'test-signer-cert-01',
+      async signData(targetAlias, dataBuffer) {
+        const buf = Buffer.isBuffer(targetAlias) ? targetAlias : dataBuffer;
+        return await self.signData(alias, buf);
+      },
+      async close() {},
     };
   }
 }

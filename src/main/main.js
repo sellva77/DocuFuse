@@ -38,7 +38,7 @@ function createWindow() {
     height: 750,
     minWidth: 800,
     minHeight: 600,
-    title: 'Document Merger',
+    title: 'DocuFuse',
     icon: getAppIcon(),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),

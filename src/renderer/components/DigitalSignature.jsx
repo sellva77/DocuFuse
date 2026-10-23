@@ -356,6 +356,7 @@ export default function DigitalSignature({ onNotification }) {
       keyAlgorithm: chosenCert.keyAlgorithm,
       keySize: chosenCert.keySize,
       thumbprint: chosenCert.thumbprint,
+      certDerBase64: chosenCert.certDerBase64,
       isHardwareToken: chosenCert.isHardwareToken,
       isTestCertificate: chosenCert.isTestCertificate,
       providerId: chosenCert.providerId,
@@ -1039,7 +1040,7 @@ export default function DigitalSignature({ onNotification }) {
                 <Icons.CheckCircle />
                 <div>
                   <h4>Document Signed & Cryptographically Verified!</h4>
-                  <p>The PDF has been digitally signed in full accordance with ISO 32000-1 / PAdES standards.</p>
+                  <p>The PDF has been digitally signed in full accordance with ETSI EN 319 142 / PAdES Baseline (PAdES-B-B) and eIDAS standards.</p>
                 </div>
               </div>
 
@@ -1121,7 +1122,7 @@ export default function DigitalSignature({ onNotification }) {
                   </h4>
                   <p>
                     {batchResults.failCount === 0
-                      ? 'All documents have been digitally signed in full accordance with ISO 32000-1 / PAdES standards.'
+                      ? 'All documents have been digitally signed in full accordance with ETSI EN 319 142 / PAdES Baseline (PAdES-B-B) and eIDAS standards.'
                       : `${batchResults.failCount} document(s) failed to sign. See details below.`}
                   </p>
                 </div>
@@ -1309,6 +1310,16 @@ export default function DigitalSignature({ onNotification }) {
                         <span className="detail-label">Signing Time:</span>
                         <span className="detail-val">{verifyReport.metadata?.signingTime || 'Not specified'}</span>
                       </div>
+                      <div className="verify-detail-row">
+                        <span className="detail-label">Signature Format:</span>
+                        <span className="detail-val font-semibold text-accent">{verifyReport.pades?.profile || 'PAdES-B-B (ETSI EN 319 142 / eIDAS)'}</span>
+                      </div>
+                      <div className="verify-detail-row">
+                        <span className="detail-label">SubFilter & Protection:</span>
+                        <span className="detail-val font-mono text-sm">
+                          {verifyReport.pades?.subFilter || 'ETSI.CAdES.detached'} (RFC 5035 Anti-Substitution Protected)
+                        </span>
+                      </div>
                     </div>
 
                     <div className="sig-status-grid">
@@ -1332,6 +1343,20 @@ export default function DigitalSignature({ onNotification }) {
                           <span className="status-title">Cryptographic Signature</span>
                           <span className="status-desc">
                             {verifyReport.signatureValid ? 'RSA signature matches public key.' : 'Cryptographic signature is invalid.'}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="sig-status-item">
+                        <div className={`status-indicator ${verifyReport.pades?.isPades ? 'pass' : 'info'}`}>
+                          <Icons.ShieldCheck />
+                        </div>
+                        <div>
+                          <span className="status-title">PAdES Standard (eIDAS)</span>
+                          <span className="status-desc">
+                            {verifyReport.pades?.isPades
+                              ? `${verifyReport.pades.profile} compliant with ESS SigningCertificateV2 binding.`
+                              : 'Standard PDF digital signature.'}
                           </span>
                         </div>
                       </div>

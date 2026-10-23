@@ -1,7 +1,7 @@
 import React from 'react';
 import { Icons } from './Icons';
 
-export default function ControlsPanel({ outputFormat, onFormatChange, onMerge, canMerge, isMerging }) {
+export default function ControlsPanel({ outputFormat, onFormatChange, onMerge, onPreview, canMerge, isMerging }) {
   return (
     <div className="controls-panel">
       <div className="format-selector">
@@ -28,16 +28,32 @@ export default function ControlsPanel({ outputFormat, onFormatChange, onMerge, c
         </div>
       </div>
 
-      <button
-        className="btn-merge"
-        onClick={onMerge}
-        disabled={!canMerge || isMerging}
-        aria-label="Merge and export documents"
-        id="btn-merge"
-      >
-        <Icons.Merge />
-        {isMerging ? 'Merging...' : 'Merge & Export'}
-      </button>
+      <div className="controls-actions">
+        {onPreview && (
+          <button
+            type="button"
+            className="btn-preview-merged"
+            onClick={onPreview}
+            disabled={!canMerge}
+            title="Preview documents before merging"
+            id="btn-preview-merged"
+          >
+            <Icons.Eye />
+            Preview
+          </button>
+        )}
+
+        <button
+          className="btn-merge"
+          onClick={onMerge}
+          disabled={!canMerge || isMerging}
+          aria-label="Merge and export documents"
+          id="btn-merge"
+        >
+          <Icons.Merge />
+          {isMerging ? 'Merging...' : 'Merge & Export'}
+        </button>
+      </div>
     </div>
   );
 }

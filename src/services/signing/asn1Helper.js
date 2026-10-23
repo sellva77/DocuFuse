@@ -41,6 +41,9 @@ export const OIDS = {
   // Signature Algorithms
   RSA_ENCRYPTION: '1.2.840.113549.1.1.1',
   SHA256_WITH_RSA_ENCRYPTION: '1.2.840.113549.1.1.11',
+
+  // PAdES / CAdES Attributes (ETSI EN 319 122 / RFC 5035)
+  SIGNING_CERTIFICATE_V2: '1.2.840.113549.1.9.16.2.47',
 };
 
 /**
@@ -259,17 +262,61 @@ export function extractCertIssuerAndSerial(certDer) {
 }
 
 /**
+ * Build RFC 5035 / ETSI EN 319 122 signing-certificate-v2 attribute
+ * Mandatory for PAdES Baseline (PAdES-B-B / PAdES-BES) eIDAS compliance
+ *
+ * SigningCertificateV2 ::= SEQUENCE {
+ *   certs SEQUENCE OF ESSCertIDv2,
+ *   policies SEQUENCE OF PolicyInformation OPTIONAL
+ * }
+ * ESSCertIDv2 ::= SEQUENCE {
+ *   hashAlgorithm AlgorithmIdentifier DEFAULT { algorithm id-sha256 },
+ *   certHash Hash,
+ *   issuerSerial IssuerSerial OPTIONAL
+ * }
+ *
+ * @param {Buffer} certDer - X.509 certificate DER bytes
+ * @returns {Buffer} DER-encoded Attribute SEQUENCE
+ */
+export function buildSigningCertificateV2Attr(certDer) {
+  if (!certDer || !Buffer.isBuffer(certDer) || certDer.length === 0) {
+    return null;
+  }
+  const certHash = crypto.createHash('sha256').update(certDer).digest();
+  const certHashOctet = derOctetString(certHash);
+
+  // RFC 5035 & ETSI EN 319 122-1 § 5.2.2:
+  // ESSCertIDv2 ::= SEQUENCE {
+  //   hashAlgorithm AlgorithmIdentifier DEFAULT {algorithm id-sha256},
+  //   certHash Hash,
+  //   issuerSerial IssuerSerial OPTIONAL
+  // }
+  // Under DER rules, fields matching DEFAULT (SHA-256) MUST be omitted.
+  // ETSI EN 319 122-1 clause 5.2.2: "The hashAlgorithm field shall be absent when SHA-256 is used.
+  // The issuerSerial field should be absent."
+  const essCertIdV2 = derSequence(certHashOctet);
+  const signingCertificateV2 = derSequence(derSequence(essCertIdV2));
+
+  return derSequence(
+    derOID(OIDS.SIGNING_CERTIFICATE_V2),
+    derSet(signingCertificateV2)
+  );
+}
+
+/**
  * Build SignedAttributes SET for PAdES / CAdES detached signature
- * SignedAttributes MUST contain:
+ * For PAdES-B-B / PAdES-BES compliance (ETSI EN 319 142), SignedAttributes contains:
  * 1. contentType (id-data: 1.2.840.113549.1.7.1)
  * 2. signingTime (current UTC time)
  * 3. messageDigest (SHA-256 of the PDF ByteRange bytes)
+ * 4. id-aa-signingCertificateV2 (RFC 5035 certificate hash binding for anti-substitution)
  * 
  * @param {Buffer} pdfDigest - SHA-256 digest (32 bytes) of the PDF ByteRange
  * @param {Date} [signingDate] - Signing time
- * @returns {{ signedAttrsDer: Buffer, signedAttrsSet: Buffer }}
+ * @param {Buffer} [certDer] - Signer certificate DER bytes (mandatory for PAdES)
+ * @returns {{ signedAttrsSet: Buffer, bytesToSign: Buffer }}
  */
-export function buildSignedAttributes(pdfDigest, signingDate = new Date()) {
+export function buildSignedAttributes(pdfDigest, signingDate = new Date(), certDer = null) {
   // Attribute 1: contentType
   const attrContentType = derSequence(
     derOID(OIDS.CONTENT_TYPE),
@@ -288,8 +335,18 @@ export function buildSignedAttributes(pdfDigest, signingDate = new Date()) {
     derSet(derOctetString(pdfDigest))
   );
 
+  const attrsList = [attrContentType, attrSigningTime, attrMessageDigest];
+
+  // Attribute 4: signingCertificateV2 (PAdES / eIDAS mandatory)
+  if (certDer && Buffer.isBuffer(certDer) && certDer.length > 0) {
+    const sigCertV2Attr = buildSigningCertificateV2Attr(certDer);
+    if (sigCertV2Attr) {
+      attrsList.push(sigCertV2Attr);
+    }
+  }
+
   // In DER, SET attributes must be ordered lexicographically by their encoded bytes
-  const sortedAttrs = [attrContentType, attrSigningTime, attrMessageDigest].sort((a, b) =>
+  const sortedAttrs = attrsList.sort((a, b) =>
     Buffer.compare(a, b)
   );
 
@@ -340,12 +397,12 @@ export function buildPkcs7SignedData({ certDer, signedAttrsSet, signatureBytes, 
   const { issuerDer, serialNumberDer } = extractCertIssuerAndSerial(certDer);
 
   // AlgorithmIdentifier: SHA-256
+  // RFC 5754: Parameters for SHA-256 in CMS digestAlgorithms MUST be absent
   const sha256Alg = derSequence(
-    derOID(OIDS.SHA256),
-    derNull()
+    derOID(OIDS.SHA256)
   );
 
-  // AlgorithmIdentifier: RSA Encryption
+  // AlgorithmIdentifier: RSA Encryption (PKCS#1 v1.5 requires NULL parameter)
   const rsaAlg = derSequence(
     derOID(OIDS.RSA_ENCRYPTION),
     derNull()
@@ -360,7 +417,9 @@ export function buildPkcs7SignedData({ certDer, signedAttrsSet, signatureBytes, 
   );
 
   // Certificates [0] IMPLICIT SET OF Certificate
+  // In DER, SET OF elements must be lexicographically sorted by their encoded bytes
   const allCerts = [certDer, ...chainDers];
+  allCerts.sort((a, b) => Buffer.compare(a, b));
   const certsBuffer = Buffer.concat(allCerts);
   // [0] IMPLICIT tag: 0xa0
   const certificatesTag = derTag(0xa0, certsBuffer);
@@ -372,9 +431,6 @@ export function buildPkcs7SignedData({ certDer, signedAttrsSet, signatureBytes, 
   );
 
   // signedAttrs in SignerInfo has [0] IMPLICIT tag: 0xa0
-  // Note: Replace the SET tag 0x31 with 0xa0 for the IMPLICIT context tag in SignerInfo
-  const signedAttrsValue = signedAttrsSet.subarray(1 + encodeLength(signedAttrsSet.length - (1 + encodeLength(0).length)).length);
-  // More reliably: read TLV of signedAttrsSet and wrap value with tag 0xa0
   const setTlv = readDerTLV(signedAttrsSet, 0);
   const signedAttrsImplicit = derTag(0xa0, setTlv.value);
 
@@ -428,6 +484,7 @@ export default {
   readDerTLV,
   decodeOID,
   extractCertIssuerAndSerial,
+  buildSigningCertificateV2Attr,
   buildSignedAttributes,
   buildPkcs7SignedData,
 };

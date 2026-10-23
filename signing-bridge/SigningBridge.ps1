@@ -17,68 +17,101 @@ function Get-IsoDate($date) {
     return $date.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
 }
 
-if ($Command -eq "list-certs") {
-    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("My", "CurrentUser")
-    $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
-    $certsList = @()
-    $now = [DateTime]::UtcNow
+function Find-TargetCertificate([string]$rawAlias) {
+    if (-not $rawAlias) { return $null }
+    $clean = $rawAlias.Trim().Trim('"').Trim("'").Replace(" ", "")
 
-    foreach ($cert in $store.Certificates) {
-        try {
-            $hasKey = $cert.HasPrivateKey
-            $subject = if ($cert.Subject) { $cert.Subject } else { "" }
-            $issuer = if ($cert.Issuer) { $cert.Issuer } else { "" }
-            $isSystem = ($issuer -like "*MS-Organization-Access*" -or $issuer -like "*Microsoft Windows*" -or $subject -match "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
-            
-            $canSign = $false
-            if ($hasKey -and -not $isSystem) {
-                $canSign = $true
-                foreach ($ext in $cert.Extensions) {
-                    if ($ext -is [System.Security.Cryptography.X509Certificates.X509KeyUsageExtension]) {
-                        $usages = $ext.KeyUsages
-                        $canSign = [bool]($usages -band ([System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::DigitalSignature -bor [System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::NonRepudiation))
-                        break
+    for ($i = 0; $i -lt 4; $i++) {
+        foreach ($loc in @("CurrentUser", "LocalMachine")) {
+            try {
+                $st = New-Object System.Security.Cryptography.X509Certificates.X509Store("My", $loc)
+                $st.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+                foreach ($c in $st.Certificates) {
+                    $thumb = if ($c.Thumbprint) { $c.Thumbprint.Trim().Replace(" ", "") } else { "" }
+                    $serial = if ($c.SerialNumber) { $c.SerialNumber.Trim().Replace(" ", "") } else { "" }
+                    if ($thumb -ieq $clean -or $serial -ieq $clean -or $thumb -like "*$clean*" -or ($c.Subject -and $c.Subject -like "*$clean*") -or ($c.FriendlyName -and $c.FriendlyName -like "*$clean*")) {
+                        return @{ Cert = $c; Store = $st }
                     }
                 }
-            }
-
-            $isExpired = ($cert.NotAfter.ToUniversalTime() -lt $now)
-            $notYetValid = ($cert.NotBefore.ToUniversalTime() -gt $now)
-            $isEligible = (-not $isSystem -and $hasKey -and $canSign -and -not $isExpired -and -not $notYetValid)
-
-            $keyAlg = "RSA"
-            $keySize = 0
-            try {
-                if ($cert.PublicKey -and $cert.PublicKey.Key) {
-                    $keySize = $cert.PublicKey.Key.KeySize
-                    $keyAlg = $cert.PublicKey.Oid.FriendlyName
-                }
+                $st.Close()
             } catch {}
+        }
+        if ($i -lt 3) { Start-Sleep -Milliseconds 400 }
+    }
+    return $null
+}
 
-            $certDerBase64 = [Convert]::ToBase64String($cert.RawData)
-            $thumbprint = $cert.Thumbprint.ToUpper()
+if ($Command -eq "list-certs") {
+    $certsList = @()
+    $seen = @{}
+    $now = [DateTime]::UtcNow
 
-            $item = "{" +
-                "`"alias`":`"$thumbprint`"," +
-                "`"subject`":`"$(Escape-Json $subject)`"," +
-                "`"issuer`":`"$(Escape-Json $issuer)`"," +
-                "`"serialNumber`":`"$($cert.SerialNumber.ToUpper())`"," +
-                "`"validFrom`":`"$(Get-IsoDate $cert.NotBefore)`"," +
-                "`"validTo`":`"$(Get-IsoDate $cert.NotAfter)`"," +
-                "`"hasPrivateKey`":$([bool]$hasKey).ToString().ToLower()," +
-                "`"isExpired`":$([bool]$isExpired).ToString().ToLower()," +
-                "`"notYetValid`":$([bool]$notYetValid).ToString().ToLower()," +
-                "`"isSystemCert`":$([bool]$isSystem).ToString().ToLower()," +
-                "`"isEligibleForSigning`":$([bool]$isEligible).ToString().ToLower()," +
-                "`"keyAlgorithm`":`"$(Escape-Json $keyAlg)`"," +
-                "`"keySize`":$keySize," +
-                "`"thumbprint`":`"$thumbprint`"," +
-                "`"certDerBase64`":`"$certDerBase64`"" +
-                "}"
-            $certsList += $item
+    foreach ($loc in @("CurrentUser", "LocalMachine")) {
+        try {
+            $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("My", $loc)
+            $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+
+            foreach ($cert in $store.Certificates) {
+                try {
+                    $thumbprint = if ($cert.Thumbprint) { $cert.Thumbprint.ToUpper() } else { "" }
+                    if (-not $thumbprint -or $seen.ContainsKey($thumbprint)) { continue }
+                    $seen[$thumbprint] = $true
+
+                    $hasKey = $cert.HasPrivateKey
+                    $subject = if ($cert.Subject) { $cert.Subject } else { "" }
+                    $issuer = if ($cert.Issuer) { $cert.Issuer } else { "" }
+                    $isSystem = ($issuer -like "*MS-Organization-Access*" -or $issuer -like "*Microsoft Windows*" -or $subject -match "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+                    
+                    $canSign = $false
+                    if ($hasKey -and -not $isSystem) {
+                        $canSign = $true
+                        foreach ($ext in $cert.Extensions) {
+                            if ($ext -is [System.Security.Cryptography.X509Certificates.X509KeyUsageExtension]) {
+                                $usages = $ext.KeyUsages
+                                $canSign = [bool]($usages -band ([System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::DigitalSignature -bor [System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::NonRepudiation))
+                                break
+                            }
+                        }
+                    }
+
+                    $isExpired = ($cert.NotAfter.ToUniversalTime() -lt $now)
+                    $notYetValid = ($cert.NotBefore.ToUniversalTime() -gt $now)
+                    $isEligible = (-not $isSystem -and $hasKey -and $canSign -and -not $isExpired -and -not $notYetValid)
+
+                    $keyAlg = "RSA"
+                    $keySize = 0
+                    try {
+                        if ($cert.PublicKey -and $cert.PublicKey.Key) {
+                            $keySize = $cert.PublicKey.Key.KeySize
+                            $keyAlg = $cert.PublicKey.Oid.FriendlyName
+                        }
+                    } catch {}
+
+                    $certDerBase64 = [Convert]::ToBase64String($cert.RawData)
+
+                    $item = "{" +
+                        "`"alias`":`"$thumbprint`"," +
+                        "`"subject`":`"$(Escape-Json $subject)`"," +
+                        "`"issuer`":`"$(Escape-Json $issuer)`"," +
+                        "`"serialNumber`":`"$($cert.SerialNumber.ToUpper())`"," +
+                        "`"validFrom`":`"$(Get-IsoDate $cert.NotBefore)`"," +
+                        "`"validTo`":`"$(Get-IsoDate $cert.NotAfter)`"," +
+                        "`"hasPrivateKey`":$([bool]$hasKey).ToString().ToLower()," +
+                        "`"isExpired`":$([bool]$isExpired).ToString().ToLower()," +
+                        "`"notYetValid`":$([bool]$notYetValid).ToString().ToLower()," +
+                        "`"isSystemCert`":$([bool]$isSystem).ToString().ToLower()," +
+                        "`"isEligibleForSigning`":$([bool]$isEligible).ToString().ToLower()," +
+                        "`"keyAlgorithm`":`"$(Escape-Json $keyAlg)`"," +
+                        "`"keySize`":$keySize," +
+                        "`"thumbprint`":`"$thumbprint`"," +
+                        "`"certDerBase64`":`"$certDerBase64`"" +
+                        "}"
+                    $certsList += $item
+                } catch {}
+            }
+            $store.Close()
         } catch {}
     }
-    $store.Close()
 
     Write-Output ("{`"success`":true,`"certificates`":[" + ($certsList -join ",") + "]}")
     exit 0
@@ -92,34 +125,17 @@ elseif ($Command -eq "sign-data") {
         exit 1
     }
 
-    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("My", "CurrentUser")
-    $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
-    
-    $targetCert = $null
-    foreach ($cert in $store.Certificates) {
-        if ($cert.Thumbprint -ieq $alias -or $cert.SerialNumber -ieq $alias -or $cert.FriendlyName -ieq $alias) {
-            $targetCert = $cert
-            break
-        }
-    }
-
-    if (-not $targetCert) {
-        foreach ($cert in $store.Certificates) {
-            if ($cert.Thumbprint -like "*$alias*" -or $cert.Subject -like "*$alias*") {
-                $targetCert = $cert
-                break
-            }
-        }
-    }
-
-    if (-not $targetCert) {
-        $store.Close()
-        Write-Output ("{`"success`":false,`"error`":`"Certificate not found in Windows-MY store: $(Escape-Json $alias)`"}")
+    $found = Find-TargetCertificate $alias
+    if (-not $found) {
+        Write-Output ("{`"success`":false,`"error`":`"Certificate not found in Windows store: $(Escape-Json $alias). Please verify USB token is plugged in.`"}")
         exit 1
     }
 
+    $targetCert = $found.Cert
+    $store = $found.Store
+
     if (-not $targetCert.HasPrivateKey) {
-        $store.Close()
+        if ($store) { $store.Close() }
         Write-Output ("{`"success`":false,`"error`":`"Certificate has no accessible private key: $(Escape-Json $alias)`"}")
         exit 1
     }
@@ -194,6 +210,104 @@ elseif ($Command -eq "verify-data") {
     }
 
     Write-Output "{`"success`":true,`"valid`":$([bool]$valid).ToString().ToLower()}"
+    exit 0
+}
+elseif ($Command -eq "session") {
+    $alias = $Arg1
+    if (-not $alias) {
+        Write-Output '{"success":false,"error":"Missing alias for session"}'
+        exit 1
+    }
+
+    $found = Find-TargetCertificate $alias
+    if (-not $found) {
+        Write-Output ("{`"success`":false,`"error`":`"Certificate not found: $(Escape-Json $alias). Please verify USB token is plugged in.`"}")
+        exit 1
+    }
+
+    $targetCert = $found.Cert
+    $store = $found.Store
+
+    if (-not $targetCert.HasPrivateKey) {
+        if ($store) { $store.Close() }
+        Write-Output ("{`"success`":false,`"error`":`"Certificate has no private key: $(Escape-Json $alias)`"}")
+        exit 1
+    }
+
+    $rsa = $null
+    try {
+        $rsa = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($targetCert)
+    } catch {}
+
+    $rsaCsp = $null
+    if (-not $rsa) {
+        try {
+            $rsaCsp = [System.Security.Cryptography.RSACryptoServiceProvider]$targetCert.PrivateKey
+        } catch {}
+    }
+
+    $thumbprint = $targetCert.Thumbprint.ToUpper()
+    $certBase64 = [Convert]::ToBase64String($targetCert.RawData)
+
+    Write-Output "{`"success`":true,`"sessionReady`":true,`"thumbprint`":`"$thumbprint`",`"certBase64`":`"$certBase64`"}"
+
+    while ($true) {
+        $line = [Console]::ReadLine()
+        if ($null -eq $line) { break }
+        $line = $line.Trim()
+        if (-not $line) { continue }
+
+        if ($line -eq "close" -or $line -like "*`"close`"*") {
+            break
+        }
+        elseif ($line -eq "ping" -or $line -like "*`"ping`"*") {
+            Write-Output '{"success":true,"pong":true}'
+            continue
+        }
+
+        $dataBase64 = ""
+        if ($line.StartsWith("{")) {
+            if ($line -match '"dataBase64"\s*:\s*"([^"]+)"') {
+                $dataBase64 = $matches[1]
+            }
+        } elseif ($line.StartsWith("sign ")) {
+            $dataBase64 = $line.Substring(5).Trim()
+        }
+
+        if (-not $dataBase64) {
+            Write-Output '{"success":false,"error":"Missing dataBase64"}'
+            continue
+        }
+
+        try {
+            $dataBytes = [Convert]::FromBase64String($dataBase64)
+            $sigBytes = $null
+
+            if ($rsa) {
+                $padding = [System.Security.Cryptography.RSASignaturePadding]::Pkcs1
+                $hashAlg = [System.Security.Cryptography.HashAlgorithmName]::SHA256
+                $sigBytes = $rsa.SignData($dataBytes, $hashAlg, $padding)
+            } elseif ($rsaCsp) {
+                $sha256 = [System.Security.Cryptography.SHA256]::Create()
+                $hash = $sha256.ComputeHash($dataBytes)
+                $oid = [System.Security.Cryptography.CryptoConfig]::MapNameToOID("SHA256")
+                $sigBytes = $rsaCsp.SignHash($hash, $oid)
+            }
+
+            if ($sigBytes) {
+                $sigBase64 = [Convert]::ToBase64String($sigBytes)
+                Write-Output "{`"success`":true,`"signatureBase64`":`"$sigBase64`",`"certBase64`":`"$certBase64`",`"algorithm`":`"SHA256withRSA`"}"
+            } else {
+                Write-Output '{"success":false,"error":"Signing returned null"}'
+            }
+        } catch {
+            $err = Escape-Json $_.Exception.Message
+            Write-Output "{`"success`":false,`"error`":`"$err`"}"
+        }
+    }
+
+    $store.Close()
+    Write-Output '{"success":true,"closed":true}'
     exit 0
 }
 else {

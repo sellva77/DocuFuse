@@ -3,8 +3,12 @@ import react from '@vitejs/plugin-react';
 import electron from 'vite-plugin-electron';
 import renderer from 'vite-plugin-electron-renderer';
 import path from 'path';
+import fs from 'node:fs';
+
+const projectRoot = fs.existsSync(process.cwd()) ? fs.realpathSync.native(path.resolve(process.cwd())) : process.cwd();
 
 export default defineConfig({
+  root: projectRoot,
   plugins: [
     react(),
     electron([
@@ -42,6 +46,11 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+    },
+  },
+  server: {
+    watch: {
+      ignored: ['**/release/**', '**/dist-electron/**'],
     },
   },
   build: {

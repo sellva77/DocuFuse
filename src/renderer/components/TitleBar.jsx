@@ -32,7 +32,7 @@ export default function TitleBar() {
         <div className="titlebar-icon">
           <Icons.DocMergerLogo />
         </div>
-        <span>Document Merger</span>
+        <span>DocuFuse</span>
       </div>
       <div className="titlebar-controls">
         <button className="titlebar-btn" onClick={handleMinimize} aria-label="Minimize" id="btn-minimize">

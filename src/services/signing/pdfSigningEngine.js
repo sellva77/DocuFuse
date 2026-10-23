@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { PDFDocument, rgb, StandardFonts, degrees } from 'pdf-lib';
+import { PDFDocument, rgb, StandardFonts, degrees, PDFName, PDFNumber, PDFString, PDFHexString, PDFArray, PDFRef, PDFDict } from 'pdf-lib';
 import { buildSignedAttributes, buildPkcs7SignedData } from './asn1Helper.js';
 import { normalizedToPdfPoints, validatePdfPlacement, getVisualPageDimensions } from '../../utils/pdfCoordinateUtils.js';
 
@@ -9,11 +9,12 @@ const CONTENTS_PLACEHOLDER_LENGTH = 16384; // 8192 bytes in hex
 
 /**
  * PDF Signing Engine
- * Generates standards-compliant ISO 32000-1 / PAdES detached digital signatures
+ * Generates standards-compliant PAdES-B-B (Baseline B) / PAdES-BES electronic signatures
+ * in strict accordance with ETSI EN 319 142-1, ISO 32000-2, and European eIDAS regulation.
  */
 export class PdfSigningEngine {
   /**
-   * Prepares and cryptographically signs a PDF document
+   * Prepares and cryptographically signs a PDF document with PAdES compliance
    * 
    * @param {Object} options
    * @param {Buffer|Uint8Array} options.pdfBuffer - Source PDF bytes
@@ -49,24 +50,24 @@ export class PdfSigningEngine {
     const signingDate = new Date();
     const signerName = appearance.signerName || certificateInfo.subjectCommonName || 'Authorized Signer';
 
-    // Step 1: Load PDF into pdf-lib to add visual appearance (if requested)
+    // Step 1: Load PDF into pdf-lib to add visual appearance and configure PAdES AcroForm field
     const pdfDoc = await PDFDocument.load(pdfBuffer, { ignoreEncryption: true });
     const pageCount = pdfDoc.getPageCount();
 
+    // Determine target page
+    let targetPageIndex = pageCount - 1; // Default to last page
+    if (appearance.page === 'first') targetPageIndex = 0;
+    else if (typeof appearance.page === 'number' && appearance.page >= 1 && appearance.page <= pageCount) {
+      targetPageIndex = appearance.page - 1;
+    }
+
+    const targetPage = pdfDoc.getPage(targetPageIndex);
+    const { width: pageWidth, height: pageHeight } = targetPage.getSize();
+    const rotation = targetPage.getRotation()?.angle || 0;
+
+    let posX = 0, posY = 0, stampWidth = 0, stampHeight = 0;
+
     if (visibleSignature) {
-      // Determine page
-      let targetPageIndex = pageCount - 1; // Default to last page
-      if (appearance.page === 'first') targetPageIndex = 0;
-      else if (typeof appearance.page === 'number' && appearance.page >= 1 && appearance.page <= pageCount) {
-        targetPageIndex = appearance.page - 1;
-      }
-
-      const page = pdfDoc.getPage(targetPageIndex);
-      const { width: pageWidth, height: pageHeight } = page.getSize();
-      const rotation = page.getRotation()?.angle || 0;
-
-      let posX, posY, stampWidth, stampHeight;
-
       // Check for normalized coordinates from interactive canvas placement
       if (
         typeof appearance.normX === 'number' &&
@@ -100,13 +101,11 @@ export class PdfSigningEngine {
         stampWidth = pdfRect.width;
         stampHeight = pdfRect.height;
       } else if (typeof appearance.pdfX === 'number' && typeof appearance.pdfY === 'number') {
-        // Direct PDF point coordinates
         posX = appearance.pdfX;
         posY = appearance.pdfY;
         stampWidth = appearance.pdfWidth || 210;
         stampHeight = appearance.pdfHeight || 65;
       } else {
-        // Legacy fixed position mode (fallback)
         stampWidth = appearance.width || 210;
         stampHeight = appearance.height || 65;
         posX = pageWidth - stampWidth - 25;
@@ -128,8 +127,8 @@ export class PdfSigningEngine {
         }
       }
 
-      // Draw aesthetic signature appearance box
-      await renderSignatureStamp(pdfDoc, page, {
+      // Draw aesthetic signature appearance stamp (black text on transparent background)
+      await renderSignatureStamp(pdfDoc, targetPage, {
         x: posX,
         y: posY,
         width: stampWidth,
@@ -144,44 +143,162 @@ export class PdfSigningEngine {
       });
     }
 
-    // Save PDF with incremental visual modifications
-    const modifiedPdfBytes = await pdfDoc.save({ useObjectStreams: false });
+    // Step 2: Configure PAdES-compliant AcroForm and Signature Widget Annotation
+    // Fixed-length byte range placeholders for deterministic buffer patching
+    const byteRangePlaceholder = [
+      PDFNumber.of(0),
+      PDFNumber.of(1000000000),
+      PDFNumber.of(1000000000),
+      PDFNumber.of(1000000000),
+    ];
+    const contentsPlaceholder = PDFHexString.of('0'.repeat(CONTENTS_PLACEHOLDER_LENGTH));
 
-    // Step 2: Prepare PDF buffer with /ByteRange and /Contents signature placeholder
-    const prepared = preparePdfForSignature(Buffer.from(modifiedPdfBytes), {
-      reason,
-      location,
-      contactInfo,
-      signingDate,
+    const pad = (n) => String(n).padStart(2, '0');
+    const pdfDateStr = `D:${signingDate.getUTCFullYear()}${pad(signingDate.getUTCMonth() + 1)}${pad(signingDate.getUTCDate())}${pad(signingDate.getUTCHours())}${pad(signingDate.getUTCMinutes())}${pad(signingDate.getUTCSeconds())}+00'00'`;
+
+    // Signature Dictionary with ETSI.CAdES.detached (PAdES specification ETSI EN 319 142)
+    const sigDict = pdfDoc.context.obj({
+      Type: 'Sig',
+      Filter: 'Adobe.PPKLite',
+      SubFilter: 'ETSI.CAdES.detached',
+      ByteRange: byteRangePlaceholder,
+      Contents: contentsPlaceholder,
+      M: PDFString.of(pdfDateStr),
+      ...(reason ? { Reason: PDFString.of(reason) } : {}),
+      ...(location ? { Location: PDFString.of(location) } : {}),
+      ...(contactInfo ? { ContactInfo: PDFString.of(contactInfo) } : {}),
     });
+    const sigDictRef = pdfDoc.context.register(sigDict);
 
-    // Step 3: Compute SHA-256 digest over the byte ranges
-    const range1 = prepared.buffer.subarray(prepared.byteRange[0], prepared.byteRange[0] + prepared.byteRange[1]);
-    const range2 = prepared.buffer.subarray(prepared.byteRange[2], prepared.byteRange[2] + prepared.byteRange[3]);
+    // Interactive Signature Widget Annotation
+    const sigField = pdfDoc.context.obj({
+      Type: 'Annot',
+      Subtype: 'Widget',
+      FT: 'Sig',
+      Rect: [posX, posY, posX + stampWidth, posY + stampHeight],
+      V: sigDictRef,
+      T: PDFString.of(`Signature${targetPageIndex + 1}`),
+      F: visibleSignature ? 132 : 2,
+      P: targetPage.ref,
+    });
+    const sigFieldRef = pdfDoc.context.register(sigField);
+
+    // Attach to target page Annotations array
+    let annots = targetPage.node.get(PDFName.of('Annots'));
+    // Dereference if it's an indirect reference (PDFRef)
+    if (annots instanceof PDFRef) {
+      annots = pdfDoc.context.lookup(annots);
+    }
+    if (!annots) {
+      targetPage.node.set(PDFName.of('Annots'), pdfDoc.context.obj([sigFieldRef]));
+    } else if (annots instanceof PDFArray) {
+      annots.push(sigFieldRef);
+    } else {
+      // Unknown type — overwrite with a fresh array containing existing + new
+      targetPage.node.set(PDFName.of('Annots'), pdfDoc.context.obj([sigFieldRef]));
+    }
+
+    // Attach to Document Catalog AcroForm with SigFlags = 3 (SignaturesExist + AppendOnly per PAdES spec)
+    let acroForm = pdfDoc.catalog.get(PDFName.of('AcroForm'));
+    // Dereference if it's an indirect reference (PDFRef)
+    if (acroForm instanceof PDFRef) {
+      acroForm = pdfDoc.context.lookup(acroForm);
+    }
+    if (!acroForm || !(acroForm instanceof PDFDict)) {
+      acroForm = pdfDoc.context.obj({
+        Fields: [sigFieldRef],
+        SigFlags: 3,
+      });
+      pdfDoc.catalog.set(PDFName.of('AcroForm'), acroForm);
+    } else {
+      acroForm.set(PDFName.of('SigFlags'), PDFNumber.of(3));
+      let fields = acroForm.get(PDFName.of('Fields'));
+      // Dereference fields too
+      if (fields instanceof PDFRef) {
+        fields = pdfDoc.context.lookup(fields);
+      }
+      if (!fields || !(fields instanceof PDFArray)) {
+        acroForm.set(PDFName.of('Fields'), pdfDoc.context.obj([sigFieldRef]));
+      } else {
+        fields.push(sigFieldRef);
+      }
+    }
+
+    // Step 3: Save PDF and compute ByteRange
+    const modifiedPdfBytes = await pdfDoc.save({ useObjectStreams: false });
+    const signedBuffer = Buffer.from(modifiedPdfBytes);
+    const pdfStr = signedBuffer.toString('binary');
+
+    // Find the signature dictionary (/Type /Sig) to avoid matching page contents
+    const sigTypeIdx = pdfStr.lastIndexOf('/Type /Sig');
+    const searchStart = sigTypeIdx !== -1 ? sigTypeIdx : 0;
+
+    const byteRangeIdx = pdfStr.indexOf('/ByteRange', searchStart);
+    if (byteRangeIdx === -1) {
+      throw new Error('Internal error: /ByteRange placeholder not found in PDF structure');
+    }
+    const byteRangeStart = pdfStr.indexOf('[', byteRangeIdx);
+    const byteRangeEnd = pdfStr.indexOf(']', byteRangeStart);
+
+    const contentsIdx = pdfStr.indexOf('/Contents', byteRangeIdx);
+    if (contentsIdx === -1) {
+      throw new Error('Internal error: /Contents placeholder not found in PDF structure');
+    }
+    const hexStart = pdfStr.indexOf('<', contentsIdx);
+    const hexEnd = pdfStr.indexOf('>', hexStart);
+
+    // ByteRange format: [ 0, len1, offset2, len2 ]
+    // Per ISO 32000-1 (PDF 1.7) § 12.8.1:
+    // len1 = offset of the opening '<' of /Contents
+    // offset2 = offset immediately following closing '>' of /Contents
+    // len2 = fileLength - offset2
+    // The entire /Contents value (<...>) is excluded from the signed byte range!
+    const len1 = hexStart;
+    const offset2 = hexEnd + 1;
+    const len2 = signedBuffer.length - offset2;
+
+    const pad10 = (n) => String(n).padStart(10, '0');
+    const actualByteRangeStr = `[ 0 ${pad10(len1)} ${pad10(offset2)} ${pad10(len2)} ]`;
+    signedBuffer.write(actualByteRangeStr, byteRangeStart, actualByteRangeStr.length, 'ascii');
+
+    // Step 4: Compute SHA-256 digest over the byte ranges
+    const range1 = signedBuffer.subarray(0, len1);
+    const range2 = signedBuffer.subarray(offset2, offset2 + len2);
     
     const hash = crypto.createHash('sha256');
     hash.update(range1);
     hash.update(range2);
     const pdfDigest = hash.digest();
 
-    // Step 4: Build SignedAttributes SET (mandatory for PAdES/CAdES)
-    const { signedAttrsSet, bytesToSign } = buildSignedAttributes(pdfDigest, signingDate);
+    // Step 5: Build SignedAttributes SET with RFC 5035 / ETSI EN 319 122 signing-certificate-v2
+    let certDer = null;
+    if (Buffer.isBuffer(certificateInfo.certDer)) {
+      certDer = certificateInfo.certDer;
+    } else if (typeof certificateInfo.certDerBase64 === 'string' && certificateInfo.certDerBase64.length > 0) {
+      certDer = Buffer.from(certificateInfo.certDerBase64, 'base64');
+    }
 
-    // Step 5: Perform genuine cryptographic signing using the selected provider
-    // (If using WindowsStoreProvider, this prompts the USB token's native PIN dialog!)
+    if (!certDer || certDer.length === 0) {
+      throw new Error(`Public certificate DER data is missing for "${certificateInfo.subjectCommonName || certificateInfo.alias || 'selected certificate'}". Required for PAdES CAdES-BES signature.`);
+    }
+
+    const { signedAttrsSet, bytesToSign } = buildSignedAttributes(pdfDigest, signingDate, certDer);
+
+    // Step 6: Perform genuine cryptographic signing using the selected provider
     const signResult = await provider.signData(certificateInfo.alias || certificateInfo.id, bytesToSign);
 
-    const certDer = signResult.certDerBuffer || Buffer.from(certificateInfo.certDerBase64, 'base64');
+    const finalCertDer = signResult.certDerBuffer || certDer;
     const signatureBytes = signResult.signatureBuffer;
 
-    // Step 6: Build the full CMS / PKCS#7 SignedData structure
+    // Step 7: Build the full CMS / PKCS#7 SignedData structure
     const pkcs7Der = buildPkcs7SignedData({
-      certDer,
+      certDer: finalCertDer,
       signedAttrsSet,
       signatureBytes,
+      chainDers: signResult.chainDers || [],
     });
 
-    // Step 7: Inject PKCS#7 hex into /Contents placeholder
+    // Step 8: Inject PKCS#7 hex into /Contents placeholder
     const pkcs7Hex = pkcs7Der.toString('hex').toUpperCase();
     if (pkcs7Hex.length > CONTENTS_PLACEHOLDER_LENGTH) {
       throw new Error(`Signature container (${pkcs7Hex.length} hex chars) exceeds placeholder allocation (${CONTENTS_PLACEHOLDER_LENGTH})`);
@@ -189,10 +306,7 @@ export class PdfSigningEngine {
 
     // Pad remaining space with zeros
     const paddedHex = pkcs7Hex.padEnd(CONTENTS_PLACEHOLDER_LENGTH, '0');
-
-    // Overwrite the placeholder directly in the buffer
-    const signedBuffer = Buffer.from(prepared.buffer);
-    signedBuffer.write(paddedHex, prepared.contentsOffset, CONTENTS_PLACEHOLDER_LENGTH, 'ascii');
+    signedBuffer.write(paddedHex, hexStart + 1, CONTENTS_PLACEHOLDER_LENGTH, 'ascii');
 
     return {
       signedPdfBuffer: signedBuffer,
@@ -206,7 +320,10 @@ export class PdfSigningEngine {
         location,
         digestAlgorithm: 'SHA-256',
         signatureAlgorithm: signResult.algorithm || 'SHA256withRSA',
-        byteRange: prepared.byteRange,
+        subFilter: 'ETSI.CAdES.detached',
+        format: 'PAdES-B-B (ETSI EN 319 142 / eIDAS)',
+        hasSigningCertV2: true,
+        byteRange: [0, len1, offset2, len2],
         isHardwareToken: certificateInfo.isHardwareToken,
         isTestCertificate: certificateInfo.isTestCertificate,
       },

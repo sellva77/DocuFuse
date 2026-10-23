@@ -1,9 +1,9 @@
 {
-  "name": "document-merger",
-  "version": "1.0.0",
-  "description": "Merge Word documents, PDF files, and convert Excel spreadsheets into unified PDF or DOCX documents",
+  "name": "docufuse",
+  "version": "1.0.2",
+  "description": "DocuFuse - Merge Word documents, PDF files, and convert Excel spreadsheets into unified PDF or DOCX documents",
   "main": "dist-electron/main.js",
-  "author": "Document Merger",
+  "author": "sellva77",
   "license": "MIT",
   "scripts": {
     "start": "npm run electron:dev",
@@ -44,8 +44,8 @@
     "wait-on": "^8.0.1"
   },
   "build": {
-    "appId": "com.documentmerger.app",
-    "productName": "Document Merger",
+    "appId": "com.docufuse.app",
+    "productName": "DocuFuse",
     "directories": {
       "output": "release"
     },
@@ -76,10 +76,10 @@
       "allowToChangeInstallationDirectory": true,
       "installerIcon": "resources/icon.ico",
       "uninstallerIcon": "resources/icon.ico",
-      "artifactName": "DocumentMergerSetup.${ext}"
+      "artifactName": "DocuFuseSetup.${ext}"
     },
     "portable": {
-      "artifactName": "DocumentMergerPortable.${ext}"
+      "artifactName": "DocuFusePortable.${ext}"
     },
     "extraResources": [
       {

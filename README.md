@@ -1,4 +1,4 @@
-# Document Merger
+# DocuFuse
 
 A standalone Windows desktop application for merging multiple PDF, DOC, and DOCX files into a single output document.
 

@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { validateFile, isPdfValid } from '../utils/fileValidator.js';
 import { listProviders, discoverCertificates, signDocument, verifyDocument } from '../services/signing/signingService.js';
+import { getCertificateProvider } from '../services/signing/certificateProvider.js';
 
 /**
  * Register narrowly-scoped IPC handlers for Digital Signing
@@ -197,6 +198,7 @@ export function registerSigningHandlers(getMainWindow) {
         keyAlgorithm: c.keyAlgorithm,
         keySize: c.keySize,
         thumbprint: c.thumbprint,
+        certDerBase64: c.certDerBase64,
         isHardwareToken: Boolean(c.isHardwareToken),
         isTestCertificate: Boolean(c.isTestCertificate),
         providerId: c.providerId,
@@ -295,66 +297,126 @@ export function registerSigningHandlers(getMainWindow) {
 
     const results = [];
     const totalFiles = files.length;
+    let signingSession = null;
 
-    for (let i = 0; i < totalFiles; i++) {
-      const inputPath = files[i];
-      const fileName = path.basename(inputPath);
-      const baseName = fileName.replace(/\.pdf$/i, '');
-      const outputPath = path.join(path.normalize(outputFolder), `${baseName}_signed.pdf`);
-
-      sendBatchProgress({
-        currentFile: fileName,
-        currentIndex: i,
-        totalFiles,
-        percent: Math.round((i / totalFiles) * 100),
-        step: 'Signing',
-        detail: `Signing ${i + 1} of ${totalFiles}: ${fileName}...`,
-      });
-
-      const docAppearance = (fileAppearances && fileAppearances[inputPath])
-        ? fileAppearances[inputPath]
-        : appearance;
-
-      try {
-        const result = await signDocument({
-          inputPath,
-          outputPath,
-          providerId,
-          certificateId,
-          certificateInfo,
-          reason,
-          location,
-          contactInfo,
-          visibleSignature,
-          appearance: docAppearance,
-          onProgress: (p) => {
-            sendBatchProgress({
-              currentFile: fileName,
-              currentIndex: i,
-              totalFiles,
-              percent: Math.round(((i + (p.percent || 0) / 100) / totalFiles) * 100),
-              step: p.step,
-              detail: `(${i + 1}/${totalFiles}) ${fileName}: ${p.detail}`,
-            });
-          },
-        });
-
-        results.push({
-          fileName,
-          inputPath,
-          outputPath: result.outputPath,
-          success: true,
-          outputSize: result.outputSize,
-        });
-      } catch (err) {
-        console.error(`Batch signing error for ${fileName}:`, err);
-        results.push({
-          fileName,
-          inputPath,
-          outputPath,
+    try {
+      const provider = getCertificateProvider(providerId);
+      if (typeof provider.createSession === 'function') {
+        const certAlias = certificateInfo?.alias || certificateId;
+        signingSession = await provider.createSession(certAlias);
+      }
+    } catch (sessionErr) {
+      console.warn('Could not initialize persistent session:', sessionErr.message);
+      const errMsg = (sessionErr.message || '').toLowerCase();
+      if (errMsg.includes('not found') || errMsg.includes('plugged in') || errMsg.includes('disconnected')) {
+        return {
           success: false,
-          error: err.message || 'Signing failed',
+          successCount: 0,
+          failCount: totalFiles,
+          totalFiles,
+          results: files.map(f => ({
+            fileName: path.basename(f),
+            inputPath: f,
+            success: false,
+            error: sessionErr.message,
+          })),
+          error: sessionErr.message,
+        };
+      }
+    }
+
+    try {
+      for (let i = 0; i < totalFiles; i++) {
+        const inputPath = files[i];
+        const fileName = path.basename(inputPath);
+        const baseName = fileName.replace(/\.pdf$/i, '');
+        const outputPath = path.join(path.normalize(outputFolder), `${baseName}_signed.pdf`);
+
+        sendBatchProgress({
+          currentFile: fileName,
+          currentIndex: i,
+          totalFiles,
+          percent: Math.round((i / totalFiles) * 100),
+          step: 'Signing',
+          detail: `Signing ${i + 1} of ${totalFiles}: ${fileName}...`,
         });
+
+        const docAppearance = (fileAppearances && fileAppearances[inputPath])
+          ? fileAppearances[inputPath]
+          : appearance;
+
+        try {
+          const result = await signDocument({
+            inputPath,
+            outputPath,
+            providerId,
+            certificateId,
+            certificateInfo,
+            reason,
+            location,
+            contactInfo,
+            visibleSignature,
+            appearance: docAppearance,
+            signingSession,
+            onProgress: (p) => {
+              sendBatchProgress({
+                currentFile: fileName,
+                currentIndex: i,
+                totalFiles,
+                percent: Math.round(((i + (p.percent || 0) / 100) / totalFiles) * 100),
+                step: p.step,
+                detail: `(${i + 1}/${totalFiles}) ${fileName}: ${p.detail}`,
+              });
+            },
+          });
+
+          results.push({
+            fileName,
+            inputPath,
+            outputPath: result.outputPath,
+            success: true,
+            outputSize: result.outputSize,
+          });
+        } catch (err) {
+          console.error(`Batch signing error for ${fileName}:`, err);
+          results.push({
+            fileName,
+            inputPath,
+            outputPath,
+            success: false,
+            error: err.message || 'Signing failed',
+          });
+
+          // If the user cancelled the PIN prompt or the token was disconnected, abort remaining files cleanly
+          const msg = (err.message || '').toLowerCase();
+          if (
+            msg.includes('canceled') ||
+            msg.includes('cancelled') ||
+            msg.includes('cancel') ||
+            msg.includes('not found') ||
+            msg.includes('plugged in') ||
+            msg.includes('disconnected') ||
+            msg.includes('terminated')
+          ) {
+            console.log('Token disconnected, removed, or PIN cancelled. Aborting batch cleanly.');
+            for (let j = i + 1; j < totalFiles; j++) {
+              results.push({
+                fileName: path.basename(files[j]),
+                inputPath: files[j],
+                outputPath: '',
+                success: false,
+                error: 'Batch aborted: Token disconnected or authentication cancelled.',
+              });
+            }
+            break;
+          }
+        }
+      }
+    } finally {
+      if (signingSession) {
+        try {
+          await signingSession.close();
+        } catch (_) {}
       }
     }
 
