@@ -48,7 +48,26 @@ export class PdfSigningEngine {
     }
 
     const signingDate = new Date();
-    const signerName = appearance.signerName || certificateInfo.subjectCommonName || 'Authorized Signer';
+
+    // Resolve signer name considering all DSC certificate name possibilities
+    const customFields = appearance.customAppearance?.customFields || {};
+    const signerNameSource = customFields.signerNameSource || 'certificate';
+
+    // Extract name from certificate: try subjectCommonName first, then parse CN from subject DN
+    const certCommonName = certificateInfo.subjectCommonName || '';
+    const certSubject = certificateInfo.subject || '';
+    const parsedCn = certSubject.match(/CN=([^,]+)/i)?.[1]?.trim() || '';
+    const certificateName = certCommonName || parsedCn || certSubject || '';
+
+    let signerName = '';
+    if (signerNameSource === 'none') {
+      signerName = ''; // Completely hidden
+    } else if (signerNameSource === 'custom') {
+      signerName = customFields.signerName || appearance.signerName || certificateName;
+    } else {
+      // 'certificate' mode: always use the DSC certificate name
+      signerName = certificateName || customFields.signerName || appearance.signerName || '';
+    }
 
     // Step 1: Load PDF into pdf-lib to add visual appearance and configure PAdES AcroForm field
     const pdfDoc = await PDFDocument.load(pdfBuffer, { ignoreEncryption: true });
@@ -140,6 +159,8 @@ export class PdfSigningEngine {
         serialNumber: certificateInfo.serialNumber,
         isTest: certificateInfo.isTestCertificate,
         rotation,
+        customAppearance: appearance.customAppearance,
+        certificateInfo,
       });
     }
 
@@ -332,25 +353,121 @@ export class PdfSigningEngine {
 }
 
 /**
- * Renders a visual signature stamp onto a PDF page
+ * Helper to convert HEX color string to pdf-lib rgb()
  */
-async function renderSignatureStamp(pdfDoc, page, { x, y, width, height, signerName, signingDate }) {
+function parseHexToPdfRgb(hex, fallback = { r: 0, g: 0, b: 0 }) {
+  if (!hex || typeof hex !== 'string') return rgb(fallback.r, fallback.g, fallback.b);
+  const clean = hex.replace('#', '').trim();
+  if (clean.length === 3) {
+    const r = parseInt(clean[0] + clean[0], 16) / 255;
+    const g = parseInt(clean[1] + clean[1], 16) / 255;
+    const b = parseInt(clean[2] + clean[2], 16) / 255;
+    return rgb(r, g, b);
+  }
+  if (clean.length === 6) {
+    const r = parseInt(clean.slice(0, 2), 16) / 255;
+    const g = parseInt(clean.slice(2, 4), 16) / 255;
+    const b = parseInt(clean.slice(4, 6), 16) / 255;
+    return rgb(r, g, b);
+  }
+  return rgb(fallback.r, fallback.g, fallback.b);
+}
+
+/**
+ * Helper to draw dashed line in PDF
+ */
+function drawDashedLine(page, x1, y1, x2, y2, color, thickness = 1, dashLen = 3, gapLen = 2) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  if (dist <= 0) return;
+  const step = dashLen + gapLen;
+  const ux = dx / dist;
+  const uy = dy / dist;
+
+  for (let offset = 0; offset < dist; offset += step) {
+    const curDash = Math.min(dashLen, dist - offset);
+    page.drawLine({
+      start: { x: x1 + ux * offset, y: y1 + uy * offset },
+      end: { x: x1 + ux * (offset + curDash), y: y1 + uy * (offset + curDash) },
+      thickness,
+      color,
+    });
+  }
+}
+
+/**
+ * Helper to draw dashed rectangle in PDF
+ */
+function drawDashedRect(page, x, y, width, height, color, thickness = 1, dashLen = 3, gapLen = 2) {
+  drawDashedLine(page, x, y + height, x + width, y + height, color, thickness, dashLen, gapLen);
+  drawDashedLine(page, x, y, x + width, y, color, thickness, dashLen, gapLen);
+  drawDashedLine(page, x, y, x, y + height, color, thickness, dashLen, gapLen);
+  drawDashedLine(page, x + width, y, x + width, y + height, color, thickness, dashLen, gapLen);
+}
+
+/**
+ * Renders an aesthetic visual signature stamp onto the target page
+ */
+async function renderSignatureStamp(pdfDoc, page, {
+  x,
+  y,
+  width,
+  height,
+  signerName,
+  reason,
+  location,
+  signingDate,
+  customAppearance = null,
+  certificateInfo = null,
+}) {
   const fontRegular = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  const fontItalic = await pdfDoc.embedFont(StandardFonts.TimesRomanItalic);
 
-  const scaleW = Math.min(width / 210, 1.4);
-  const scaleH = Math.min(height / 65, 1.4);
-  const scale = Math.min(scaleW, scaleH);
+  const fields = customAppearance?.customFields || {};
+  const styling = customAppearance?.styling || {};
+  const inkColorRgb = parseHexToPdfRgb(styling.inkColor || '#000000', { r: 0, g: 0, b: 0 });
 
-  const headerSize = Math.max(5.5, Math.min(9.5, 7.5 * scale));
-  const nameSize = Math.max(7.5, Math.min(14, 10.5 * scale));
-  const dateSize = Math.max(5, Math.min(8.5, 7 * scale));
+  // 1. Draw Background
+  if (styling.backgroundColor && styling.backgroundColor !== 'transparent') {
+    const bgRgb = parseHexToPdfRgb(styling.backgroundColor, { r: 1, g: 1, b: 1 });
+    page.drawRectangle({
+      x,
+      y,
+      width,
+      height,
+      color: bgRgb,
+    });
+  }
 
-  // Max characters for signer name
-  const maxChars = Math.max(10, Math.floor(width / (nameSize * 0.55)));
-  const cleanSigner = signerName.length > maxChars ? signerName.substring(0, maxChars - 2) + '...' : signerName;
+  // 2. Draw Border (matching preview border options)
+  if (styling.borderStyle && styling.borderStyle !== 'none') {
+    if (styling.borderStyle === 'blue') {
+      page.drawRectangle({
+        x,
+        y,
+        width,
+        height,
+        borderColor: rgb(0.23, 0.51, 0.96),
+        borderWidth: 1.5,
+      });
+    } else if (styling.borderStyle === 'dashed') {
+      drawDashedRect(page, x, y, width, height, rgb(0.58, 0.64, 0.72), 1, 3, 2);
+    } else {
+      // 'solid' (Subtle gray #cbd5e1 matching web preview)
+      page.drawRectangle({
+        x,
+        y,
+        width,
+        height,
+        borderColor: rgb(0.8, 0.83, 0.88),
+        borderWidth: 1,
+      });
+    }
+  }
 
-  // Format Adobe Acrobat-style standard timestamp: YYYY.MM.DD HH:mm:ss +HH'mm'
+  // Format date according to selected dateFormat
   const padTwo = (n) => String(n).padStart(2, '0');
   const d = signingDate || new Date();
   const year = d.getFullYear();
@@ -364,43 +481,310 @@ async function renderSignatureStamp(pdfDoc, page, { x, y, width, height, signerN
   const sign = tzOffsetMin >= 0 ? '+' : '-';
   const tzHours = padTwo(Math.floor(Math.abs(tzOffsetMin) / 60));
   const tzMins = padTwo(Math.abs(tzOffsetMin) % 60);
-  const dateStr = `${year}.${month}.${day} ${hours}:${minutes}:${seconds} ${sign}${tzHours}'${tzMins}'`;
 
-  // ABSOLUTELY NO BORDERLINE, NO BACKGROUND BOX - PURE CLEAN BLACK TEXT ONLY
-  const lineGap = Math.max(8, Math.round(12 * scale));
-  let cursorY = y + height - headerSize - 2;
-
-  // Line 1: "Digitally signed by" (plain black)
-  page.drawText('Digitally signed by', {
-    x,
-    y: cursorY,
-    size: headerSize,
-    font: fontRegular,
-    color: rgb(0, 0, 0),
-  });
-  cursorY -= lineGap;
-
-  // Line 2: Signer Name (bold plain black)
-  if (cursorY > y + 4) {
-    page.drawText(cleanSigner, {
-      x,
-      y: cursorY,
-      size: nameSize,
-      font: fontBold,
-      color: rgb(0, 0, 0),
-    });
-    cursorY -= lineGap;
+  let dateStr = `${year}.${month}.${day} ${hours}:${minutes}:${seconds} ${sign}${tzHours}'${tzMins}'`;
+  if (fields.dateFormat === 'date_only') {
+    dateStr = `${year}.${month}.${day}`;
+  } else if (fields.dateFormat === 'iso') {
+    dateStr = d.toISOString();
   }
 
-  // Line 3: "Date: <date and time>" (plain black)
-  if (cursorY > y - 4) {
-    page.drawText(`Date: ${dateStr}`, {
-      x,
-      y: cursorY,
-      size: dateSize,
-      font: fontRegular,
-      color: rgb(0, 0, 0),
+  // Active field values (fully customized)
+  const signerNameSource = customAppearance?.customFields?.signerNameSource || 'certificate';
+  
+  // Resolve active signer name from the appropriate source
+  let activeSigner = '';
+  if (signerNameSource === 'none') {
+    activeSigner = ''; // Hidden
+  } else if (signerNameSource === 'custom') {
+    activeSigner = fields.signerName || signerName || '';
+  } else {
+    // 'certificate' mode: prefer certificate info
+    const certCn = certificateInfo?.subjectCommonName || '';
+    const certSubject = certificateInfo?.subject || '';
+    const parsedCn = certSubject.match(/CN=([^,]+)/i)?.[1]?.trim() || '';
+    activeSigner = certCn || parsedCn || fields.signerName || signerName || '';
+  }
+
+  // Resolve prefix (support custom prefix)
+  let signPrefix = fields.signPrefix;
+  if (signPrefix === '__custom__') {
+    signPrefix = fields.signPrefixCustom || '';
+  } else if (signPrefix === undefined) {
+    signPrefix = 'Digitally signed by';
+  }
+
+  const dnString = fields.distinguishedName || certificateInfo?.subject || (activeSigner ? `cn=${activeSigner}` : '');
+  const activeReason = fields.reason !== undefined ? fields.reason : (reason || 'Document signature and certification');
+  const activeLocation = fields.location !== undefined ? fields.location : (location || 'Office');
+  const activeVersion = fields.versionText || 'DocuFuse 1.0.0';
+
+  const graphicType = customAppearance?.graphicType || 'none';
+  const includeText = customAppearance?.includeText || {
+    name: true,
+    date: true,
+    logo: false,
+    reason: false,
+    distinguishedName: false,
+    adobeVersion: false,
+    location: false,
+    labels: true,
+  };
+  const showLabels = includeText.labels !== false;
+  const textDirection = customAppearance?.textDirection || 'auto';
+
+  // Embed Custom Logo / Seal Image if provided
+  let customLogoImage = null;
+  if (includeText.logo && fields.customLogoDataUrl && typeof fields.customLogoDataUrl === 'string' && fields.customLogoDataUrl.startsWith('data:image/')) {
+    try {
+      const commaIdx = fields.customLogoDataUrl.indexOf(',');
+      if (commaIdx !== -1) {
+        const base64Str = fields.customLogoDataUrl.slice(commaIdx + 1);
+        const imgBuffer = Buffer.from(base64Str, 'base64');
+        if (fields.customLogoDataUrl.includes('image/jpeg') || fields.customLogoDataUrl.includes('image/jpg')) {
+          customLogoImage = await pdfDoc.embedJpg(imgBuffer);
+        } else {
+          customLogoImage = await pdfDoc.embedPng(imgBuffer);
+        }
+      }
+    } catch (logoErr) {
+      console.warn('Could not embed custom logo image:', logoErr);
+    }
+  }
+
+  // 3. Draw Watermark if logoPosition is 'watermark'
+  if (customLogoImage && fields.logoPosition === 'watermark') {
+    const wmSize = Math.min(width * 0.6, height * 0.85);
+    const aspect = customLogoImage.width / customLogoImage.height;
+    const wmW = aspect >= 1 ? wmSize : wmSize * aspect;
+    const wmH = aspect >= 1 ? wmSize / aspect : wmSize;
+    page.drawImage(customLogoImage, {
+      x: x + (width - wmW) / 2,
+      y: y + (height - wmH) / 2,
+      width: wmW,
+      height: wmH,
+      opacity: 0.12,
     });
+  }
+
+  // Embed graphic if Draw or Image mode
+  let embeddedGraphic = null;
+  const rawDataUrl = graphicType === 'draw'
+    ? customAppearance?.drawnDataUrl
+    : (graphicType === 'image' ? customAppearance?.imageDataUrl : null);
+
+  if (rawDataUrl && typeof rawDataUrl === 'string' && rawDataUrl.startsWith('data:image/')) {
+    try {
+      const commaIdx = rawDataUrl.indexOf(',');
+      if (commaIdx !== -1) {
+        const base64Str = rawDataUrl.slice(commaIdx + 1);
+        const imgBuffer = Buffer.from(base64Str, 'base64');
+        if (rawDataUrl.includes('image/jpeg') || rawDataUrl.includes('image/jpg')) {
+          embeddedGraphic = await pdfDoc.embedJpg(imgBuffer);
+        } else {
+          embeddedGraphic = await pdfDoc.embedPng(imgBuffer);
+        }
+      }
+    } catch (imgErr) {
+      console.warn('Could not embed custom signature graphic image:', imgErr);
+    }
+  }
+
+  // Layout geometry: if graphic is present, split box with proper margins
+  const hasGraphic = Boolean(embeddedGraphic) || (graphicType === 'text');
+  const paddingH = Math.min(8, Math.max(4, width * 0.04));
+  const paddingV = Math.min(6, Math.max(2, height * 0.05));
+
+  let graphicWidth = 0;
+  let textStartX = x + paddingH;
+  let textWidthArea = Math.max(8, width - paddingH * 2);
+
+  if (hasGraphic) {
+    graphicWidth = Math.min(width * 0.38, 120);
+    textWidthArea = Math.max(8, width - graphicWidth - paddingH * 2 - 8);
+
+    let graphicX = x + paddingH;
+    if (textDirection === 'right') {
+      // In align-right mode (flex-direction: row-reverse in CSS): text is on left, graphic on right
+      textStartX = x + paddingH;
+      graphicX = x + width - paddingH - graphicWidth;
+    } else {
+      graphicX = x + paddingH;
+      textStartX = x + paddingH + graphicWidth + 8;
+    }
+
+    if (embeddedGraphic) {
+      const imgAspect = embeddedGraphic.width / embeddedGraphic.height;
+      let drawW = Math.max(2, graphicWidth - 4);
+      let drawH = drawW / imgAspect;
+      if (drawH > height - paddingV * 2) {
+        drawH = Math.max(2, height - paddingV * 2);
+        drawW = drawH * imgAspect;
+      }
+      const imgX = graphicX + (graphicWidth - drawW) / 2;
+      const imgY = y + (height - drawH) / 2;
+
+      page.drawImage(embeddedGraphic, {
+        x: imgX,
+        y: imgY,
+        width: drawW,
+        height: drawH,
+      });
+    } else if (graphicType === 'text') {
+      const stylName = customAppearance?.textSignature && customAppearance.textSignature !== 'Authorized Signer'
+        ? customAppearance.textSignature
+        : (activeSigner || '');
+      if (stylName) {
+        const stylFont = customAppearance?.textStyle === 'serif' ? fontBold : fontItalic;
+        const stylSize = Math.max(6, Math.min(18, height * 0.45));
+        const stylW = stylFont.widthOfTextAtSize(stylName, stylSize);
+        const stylX = graphicX + Math.max(0, (graphicWidth - stylW) / 2);
+        const stylY = y + (height - stylSize) / 2;
+        page.drawText(stylName, {
+          x: stylX,
+          y: stylY,
+          size: stylSize,
+          font: stylFont,
+          color: inkColorRgb,
+        });
+      }
+    }
+  }
+
+  // Prepare text lines to render (matching exactly what is rendered in preview)
+  const lines = [];
+
+  if (includeText.name !== false && signerNameSource !== 'none' && activeSigner) {
+    const nameText = signPrefix ? `${signPrefix} ${activeSigner}`.trim() : activeSigner;
+    lines.push({
+      text: nameText,
+      isBold: true,
+      baseSize: 10,
+    });
+  }
+
+  if (includeText.distinguishedName && dnString) {
+    lines.push({
+      text: `${showLabels ? 'DN: ' : ''}${dnString}`,
+      isBold: false,
+      baseSize: 7.5,
+    });
+  }
+
+  if (includeText.date !== false) {
+    lines.push({
+      text: `${showLabels ? 'Date: ' : ''}${dateStr}`,
+      isBold: false,
+      baseSize: 8,
+    });
+  }
+
+  if (includeText.reason && activeReason) {
+    lines.push({
+      text: `${showLabels ? 'Reason: ' : ''}${activeReason}`,
+      isBold: false,
+      baseSize: 7.5,
+    });
+  }
+
+  if (includeText.location && activeLocation) {
+    lines.push({
+      text: `${showLabels ? 'Location: ' : ''}${activeLocation}`,
+      isBold: false,
+      baseSize: 7.5,
+    });
+  }
+
+  if (includeText.adobeVersion && activeVersion) {
+    lines.push({
+      text: `${showLabels ? 'Version: ' : ''}${activeVersion}`,
+      isBold: false,
+      baseSize: 7.0,
+    });
+  }
+
+  // Corner Logo Badge if logoPosition is 'badge'
+  if (customLogoImage && fields.logoPosition === 'badge' && includeText.logo) {
+    const badgeH = Math.min(14, height * 0.35);
+    const badgeW = (customLogoImage.width / customLogoImage.height) * badgeH;
+    page.drawImage(customLogoImage, {
+      x: x + width - badgeW - paddingH,
+      y: y + paddingV,
+      width: badgeW,
+      height: badgeH,
+    });
+  }
+
+  if (lines.length > 0) {
+    // 1. Calculate required height at 100% scale
+    const baseLineGapRatio = 1.35;
+    let unscaledTotalHeight = 0;
+    for (let i = 0; i < lines.length; i++) {
+      if (i === 0) {
+        unscaledTotalHeight += lines[i].baseSize;
+      } else {
+        unscaledTotalHeight += lines[i].baseSize * baseLineGapRatio;
+      }
+    }
+
+    const availHeight = Math.max(10, height - paddingV * 2);
+    const scaleH = availHeight / Math.max(1, unscaledTotalHeight);
+
+    // 2. Calculate required width at 100% scale
+    let maxLineWidth = 0;
+    for (const lineItem of lines) {
+      const f = lineItem.isBold ? fontBold : fontRegular;
+      const w = f.widthOfTextAtSize(lineItem.text, lineItem.baseSize);
+      if (w > maxLineWidth) maxLineWidth = w;
+    }
+    const scaleW = textWidthArea / Math.max(1, maxLineWidth);
+
+    // Dynamic scale: fits comfortably without shrinking to microscopic text
+    const scale = Math.max(0.5, Math.min(1.05, scaleH, scaleW));
+
+    // Compute actual sizes and line gaps
+    const lineGap = Math.max(6, Math.round(11 * scale));
+    const actualSizes = lines.map(l => Math.max(4.5, Math.round(l.baseSize * scale * 10) / 10));
+
+    // Total actual vertical block height
+    const totalActualHeight = (lines.length - 1) * lineGap + actualSizes[0] * 0.75;
+
+    // Vertical centering: centers the text block in the signature box
+    const vertPad = Math.max(2, (height - totalActualHeight) / 2);
+    let cursorY = y + height - vertPad - (actualSizes[0] * 0.75);
+
+    for (let i = 0; i < lines.length; i++) {
+      const lineItem = lines[i];
+      const size = actualSizes[i];
+      const font = lineItem.isBold ? fontBold : fontRegular;
+
+      let cleanText = lineItem.text;
+      let textWidth = font.widthOfTextAtSize(cleanText, size);
+      if (textWidth > textWidthArea) {
+        while (cleanText.length > 3 && font.widthOfTextAtSize(cleanText + '...', size) > textWidthArea) {
+          cleanText = cleanText.slice(0, -1);
+        }
+        cleanText += '...';
+        textWidth = font.widthOfTextAtSize(cleanText, size);
+      }
+
+      let drawX = textStartX;
+      if (textDirection === 'right') {
+        drawX = textStartX + textWidthArea - textWidth;
+      } else if (textDirection === 'center') {
+        drawX = textStartX + Math.max(0, (textWidthArea - textWidth) / 2);
+      }
+
+      page.drawText(cleanText, {
+        x: drawX,
+        y: cursorY,
+        size,
+        font,
+        color: inkColorRgb,
+      });
+
+      cursorY -= lineGap;
+    }
   }
 }
 

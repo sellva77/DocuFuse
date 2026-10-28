@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Icons } from './Icons';
 import PdfSignatureCanvas from './PdfSignatureCanvas';
+import SignatureAppearanceModal, { DEFAULT_APPEARANCE_CONFIG } from './SignatureAppearanceModal';
 
 /**
  * DigitalSignature Component
@@ -34,6 +35,35 @@ export default function DigitalSignature({ onNotification }) {
   const [signaturePlacement, setSignaturePlacement] = useState(null); // { page, normX, normY, normWidth, normHeight } (shared)
   const [filePlacements, setFilePlacements] = useState({}); // { [filePath]: { page, normX, normY, normWidth, normHeight } }
   const [stampPage, setStampPage] = useState('last');
+
+  // Adobe Acrobat-style custom signature appearance state
+  const [showAppearanceModal, setShowAppearanceModal] = useState(false);
+  const [customAppearance, setCustomAppearance] = useState(() => {
+    try {
+      const saved = localStorage.getItem('docufuse_active_sig_appearance');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed?.textSignature === 'Authorized Signer') {
+          parsed.textSignature = '';
+        }
+        return parsed;
+      }
+    } catch (_) {}
+    return DEFAULT_APPEARANCE_CONFIG;
+  });
+
+  const handleSaveAppearance = useCallback((newConfig) => {
+    setCustomAppearance(newConfig);
+    try {
+      localStorage.setItem('docufuse_active_sig_appearance', JSON.stringify(newConfig));
+    } catch (_) {}
+    onNotification?.({
+      type: 'success',
+      title: 'Signature Appearance Updated',
+      message: `Preset "${newConfig.presetName || 'Custom'}" is active.`,
+      duration: 4000,
+    });
+  }, [onNotification]);
 
   // Execution state
   const [isSigning, setIsSigning] = useState(false);
@@ -305,6 +335,22 @@ export default function DigitalSignature({ onNotification }) {
 
     const isBatch = selectedPdfs.length > 1;
 
+    // Resolve signer name considering all possibilities (DSC certificate CN, custom, none)
+    const certCommonName = chosenCert.subjectCommonName || '';
+    const certSubject = chosenCert.subject || '';
+    const parsedCn = certSubject.match(/CN=([^,]+)/i)?.[1]?.trim() || '';
+    const certSignerName = certCommonName || parsedCn || certSubject || '';
+
+    const signerSource = customAppearance?.customFields?.signerNameSource || 'certificate';
+    let effectiveSignerName = '';
+    if (signerSource === 'none') {
+      effectiveSignerName = '';
+    } else if (signerSource === 'custom') {
+      effectiveSignerName = customAppearance?.customFields?.signerName || certSignerName || '';
+    } else {
+      effectiveSignerName = certSignerName || customAppearance?.customFields?.signerName || '';
+    }
+
     // Per-file appearance mapping
     const fileAppearances = {};
     for (const pdf of selectedPdfs) {
@@ -316,15 +362,20 @@ export default function DigitalSignature({ onNotification }) {
           normWidth: p.normWidth,
           normHeight: p.normHeight,
           page: p.page,
-          signerName: chosenCert.subjectCommonName || 'Authorized Signer',
+          signerName: effectiveSignerName,
+          customAppearance,
         };
       } else {
         fileAppearances[pdf.filePath] = {
           page: stampPage,
-          signerName: chosenCert.subjectCommonName || 'Authorized Signer',
+          signerName: effectiveSignerName,
+          customAppearance,
         };
       }
     }
+
+    const effectiveReason = customAppearance?.customFields?.reason !== undefined ? customAppearance.customFields.reason : reason;
+    const effectiveLocation = customAppearance?.customFields?.location !== undefined ? customAppearance.customFields.location : location;
 
     const commonAppearance = visibleSignature && activeFilePlacement ? {
       normX: activeFilePlacement.normX,
@@ -332,10 +383,12 @@ export default function DigitalSignature({ onNotification }) {
       normWidth: activeFilePlacement.normWidth,
       normHeight: activeFilePlacement.normHeight,
       page: activeFilePlacement.page,
-      signerName: chosenCert.subjectCommonName || 'Authorized Signer',
+      signerName: effectiveSignerName,
+      customAppearance,
     } : {
       page: stampPage,
-      signerName: chosenCert.subjectCommonName || 'Authorized Signer',
+      signerName: effectiveSignerName,
+      customAppearance,
     };
 
     const certInfoPayload = {
@@ -378,8 +431,8 @@ export default function DigitalSignature({ onNotification }) {
           providerId: selectedProviderId,
           certificateId: selectedCertId,
           certificateInfo: certInfoPayload,
-          reason,
-          location,
+          reason: effectiveReason,
+          location: effectiveLocation,
           contactInfo,
           visibleSignature,
           appearance: commonAppearance,
@@ -443,8 +496,8 @@ export default function DigitalSignature({ onNotification }) {
           providerId: selectedProviderId,
           certificateId: selectedCertId,
           certificateInfo: certInfoPayload,
-          reason,
-          location,
+          reason: effectiveReason,
+          location: effectiveLocation,
           contactInfo,
           visibleSignature,
           appearance: commonAppearance,
@@ -910,6 +963,21 @@ export default function DigitalSignature({ onNotification }) {
                     />
                     <span>Visible signature badge on document</span>
                   </label>
+                  {visibleSignature && (
+                    <button
+                      type="button"
+                      className="btn-open-customize-appearance"
+                      onClick={() => setShowAppearanceModal(true)}
+                      title="Customize Adobe Acrobat-style signature appearance (Text, Draw, Image, Fields)"
+                      id="btn-open-customize-appearance"
+                    >
+                      <Icons.Palette />
+                      <span>Customize Appearance</span>
+                      {customAppearance?.graphicType && customAppearance.graphicType !== 'none' && (
+                        <span className="sig-graphic-type-tag">{customAppearance.graphicType}</span>
+                      )}
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -950,11 +1018,14 @@ export default function DigitalSignature({ onNotification }) {
                       filePath={currentPreviewPdf.filePath}
                       onPlacementChange={handlePlacementChange}
                       placement={activeFilePlacement}
-                      signerName={selectedCert?.subjectCommonName || 'Authorized Signer'}
+                      signerName={selectedCert?.subjectCommonName || selectedCert?.subject?.match(/CN=([^,]+)/i)?.[1]?.trim() || selectedCert?.subject || ''}
                       reason={reason}
+                      location={location}
                       disabled={isSigning}
                       onApplyToAll={handleApplyCurrentToAll}
                       hasMultipleDocs={selectedPdfs.length > 1}
+                      customAppearance={customAppearance}
+                      onOpenCustomizeAppearance={() => setShowAppearanceModal(true)}
                     />
 
                     <div className="sig-placement-bar">
@@ -1434,6 +1505,17 @@ export default function DigitalSignature({ onNotification }) {
           </div>
         </div>
       )}
+
+      {/* Adobe Acrobat Style Signature Appearance Customizer Modal */}
+      <SignatureAppearanceModal
+        isOpen={showAppearanceModal}
+        onClose={() => setShowAppearanceModal(false)}
+        onSave={handleSaveAppearance}
+        currentAppearance={customAppearance}
+        certificateInfo={selectedCert}
+        reason={reason}
+        location={location}
+      />
     </div>
   );
 }

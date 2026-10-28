@@ -28,7 +28,7 @@ import pdfParse from 'pdf-parse';
 /**
  * Process and merge multiple document files
  */
-async function processFiles({ filePaths, outputFormat, outputPath, tempDir, onProgress }) {
+async function processFiles({ filePaths, files: filesConfigs, outputFormat, outputPath, tempDir, onProgress }) {
   const totalFiles = filePaths.length;
   const progress = (step, detail, percent) => {
     if (onProgress) {
@@ -62,7 +62,15 @@ async function processFiles({ filePaths, outputFormat, outputPath, tempDir, onPr
       }
     }
 
-    fileInfos.push({ path: fp, ext, name, index: i });
+    // Match file configuration if provided
+    const fileConfig = Array.isArray(filesConfigs)
+      ? filesConfigs.find(c => c && (c.path === fp || c.filePath === fp))
+      : null;
+    const excludedPages = Array.isArray(fileConfig?.excludedPages)
+      ? fileConfig.excludedPages.map(Number).filter(n => !isNaN(n) && n > 0)
+      : [];
+
+    fileInfos.push({ path: fp, ext, name, index: i, excludedPages });
   }
 
   progress('Processing', 'Starting merge...', 5);
@@ -93,7 +101,7 @@ async function mergeToPdf(fileInfos, outputPath, tempDir, progress) {
 
     try {
       if (file.ext === '.pdf') {
-        await addPdfToMerged(mergedPdf, file.path);
+        await addPdfToMerged(mergedPdf, file.path, file.excludedPages || []);
       } else if (file.ext === '.docx') {
         await addDocxToPdfMerged(mergedPdf, file.path, file.name);
       } else if (file.ext === '.doc') {
@@ -110,7 +118,7 @@ async function mergeToPdf(fileInfos, outputPath, tempDir, progress) {
   }
 
   if (mergedPdf.getPageCount() === 0) {
-    throw new Error('No pages were produced from the input files.');
+    throw new Error('No pages were produced from the input files. All pages may have been excluded.');
   }
 
   progress('Saving', 'Writing output PDF...', 92);
@@ -119,9 +127,9 @@ async function mergeToPdf(fileInfos, outputPath, tempDir, progress) {
 }
 
 /**
- * Copy pages from a source PDF into the merged PDF
+ * Copy pages from a source PDF into the merged PDF, skipping any excluded pages
  */
-async function addPdfToMerged(mergedPdf, pdfPath) {
+async function addPdfToMerged(mergedPdf, pdfPath, excludedPages = []) {
   const pdfBytes = await fs.promises.readFile(pdfPath);
   let sourcePdf;
   try {
@@ -139,9 +147,14 @@ async function addPdfToMerged(mergedPdf, pdfPath) {
   }
 
   const pageIndices = sourcePdf.getPageIndices();
-  const copiedPages = await mergedPdf.copyPages(sourcePdf, pageIndices);
-  for (const page of copiedPages) {
-    mergedPdf.addPage(page);
+  const excludedSet = new Set((excludedPages || []).map(p => Number(p) - 1));
+  const keepIndices = pageIndices.filter(idx => !excludedSet.has(idx));
+
+  if (keepIndices.length > 0) {
+    const copiedPages = await mergedPdf.copyPages(sourcePdf, keepIndices);
+    for (const page of copiedPages) {
+      mergedPdf.addPage(page);
+    }
   }
 }
 
@@ -446,7 +459,7 @@ async function mergeToDocx(fileInfos, outputPath, tempDir, progress) {
       } else if (file.ext === '.doc') {
         sectionChildren = await extractDocForDocxOutput(file.path, file.name);
       } else if (file.ext === '.pdf') {
-        sectionChildren = await extractPdfForDocxOutput(file.path, file.name);
+        sectionChildren = await extractPdfForDocxOutput(file.path, file.name, file.excludedPages || []);
       } else if (file.ext === '.xlsx' || file.ext === '.xls') {
         sectionChildren = await extractExcelForDocxOutput(file.path, file.name);
       } else {
@@ -757,7 +770,7 @@ async function extractExcelForDocxOutput(excelPath, fileName) {
  * Extract PDF content for DOCX output.
  * Note: PDF to editable DOCX is inherently lossy. Exact layout cannot be reproduced.
  */
-async function extractPdfForDocxOutput(pdfPath, fileName) {
+async function extractPdfForDocxOutput(pdfPath, fileName, excludedPages = []) {
   const children = [];
 
   children.push(
@@ -809,12 +822,19 @@ async function extractPdfForDocxOutput(pdfPath, fileName) {
 
     // Split by pages (pdf-parse uses form feed characters)
     const pages = data.text.split(/\f/);
+    const excludedSet = new Set((excludedPages || []).map(p => Number(p)));
 
+    let includedCount = 0;
     for (let pageIdx = 0; pageIdx < pages.length; pageIdx++) {
+      const pageNum = pageIdx + 1;
+      if (excludedSet.has(pageNum)) {
+        continue;
+      }
+
       const pageText = pages[pageIdx].trim();
       if (!pageText) continue;
 
-      if (pageIdx > 0) {
+      if (includedCount > 0) {
         children.push(
           new Paragraph({
             children: [new TextRun({ text: '', break: 1 })],
@@ -822,6 +842,7 @@ async function extractPdfForDocxOutput(pdfPath, fileName) {
           })
         );
       }
+      includedCount++;
 
       const lines = pageText.split('\n');
       for (const line of lines) {

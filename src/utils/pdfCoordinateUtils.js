@@ -56,7 +56,7 @@ export function normalizeRect(rect) {
  * @param {number} minSize - Minimum allowed width/height
  * @returns {{ x: number, y: number, width: number, height: number }}
  */
-export function clampRectToBounds(rect, bounds, minSize = 20) {
+export function clampRectToBounds(rect, bounds, minSize = 5) {
   let { x, y, width, height } = normalizeRect(rect);
 
   width = Math.max(minSize, Math.min(width, bounds.width));
@@ -192,11 +192,13 @@ export function validatePdfPlacement(rect, pageWidth, pageHeight) {
     return { valid: false, error: 'Placement coordinates must be valid numbers' };
   }
 
-  if (width < 20 || height < 15) {
-    return { valid: false, error: `Signature rectangle is too small (${Math.round(width)}x${Math.round(height)} pt). Minimum size: 20x15 pt` };
+  // Allow compact signatures for tight spaces, small margins, initials, or small stamps
+  if (width < 2 || height < 2) {
+    return { valid: false, error: `Signature rectangle is too small (${Math.round(width)}x${Math.round(height)} pt). Minimum size: 2x2 pt` };
   }
 
-  if (x < -0.5 || y < -0.5 || (x + width) > pageWidth + 1 || (y + height) > pageHeight + 1) {
+  // Generous margin tolerance (2 pt) to prevent false failures from floating point rounding at page edges
+  if (x < -2 || y < -2 || (x + width) > pageWidth + 2 || (y + height) > pageHeight + 2) {
     return {
       valid: false,
       error: `Signature placement (${Math.round(x)}, ${Math.round(y)}, ${Math.round(width)}x${Math.round(height)}) exceeds page boundaries (${Math.round(pageWidth)}x${Math.round(pageHeight)})`,

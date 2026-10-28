@@ -194,7 +194,7 @@ async function main() {
     const v1 = validatePdfPlacement({ x: 100, y: 100, width: 200, height: 60 }, 612, 792);
     assert(v1.valid === true, 'Valid placement passes validation');
 
-    const v2 = validatePdfPlacement({ x: 100, y: 100, width: 10, height: 10 }, 612, 792);
+    const v2 = validatePdfPlacement({ x: 100, y: 100, width: 1, height: 1 }, 612, 792);
     assert(v2.valid === false && v2.error.includes('too small'), 'Too-small rectangle rejected');
 
     const v3 = validatePdfPlacement({ x: 600, y: 780, width: 100, height: 50 }, 612, 792);

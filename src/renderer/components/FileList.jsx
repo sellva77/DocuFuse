@@ -141,6 +141,14 @@ export default function FileList({
                   <span>{file.type}</span>
                   <span className="dot" />
                   <span>{formatFileSize(file.size)}</span>
+                  {file.excludedPages && file.excludedPages.length > 0 && (
+                    <>
+                      <span className="dot" />
+                      <span className="file-excluded-pages-badge">
+                        {file.excludedPages.length} page{file.excludedPages.length > 1 ? 's' : ''} removed
+                      </span>
+                    </>
+                  )}
                 </div>
               </div>
 

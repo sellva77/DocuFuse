@@ -42,6 +42,60 @@ function toUint8Array(data) {
 }
 
 /**
+ * Parse page range string (e.g. "1, 3, 5-8") into array of unique 1-based page numbers
+ */
+function parsePageRanges(inputStr, maxPages) {
+  if (!inputStr || typeof inputStr !== 'string') return [];
+  const parts = inputStr.split(/[\s,]+/);
+  const set = new Set();
+  for (const part of parts) {
+    if (!part) continue;
+    if (part.includes('-')) {
+      const [startStr, endStr] = part.split('-');
+      const s = parseInt(startStr, 10);
+      const e = parseInt(endStr, 10);
+      if (!isNaN(s) && !isNaN(e)) {
+        const min = Math.max(1, Math.min(s, e));
+        const max = Math.min(maxPages, Math.max(s, e));
+        for (let i = min; i <= max; i++) {
+          set.add(i);
+        }
+      }
+    } else {
+      const p = parseInt(part, 10);
+      if (!isNaN(p) && p >= 1 && p <= maxPages) {
+        set.add(p);
+      }
+    }
+  }
+  return Array.from(set).sort((a, b) => a - b);
+}
+
+/**
+ * Format array of page numbers into compact range string (e.g. [1, 3, 4, 5] -> "1, 3-5")
+ */
+function formatPageRanges(pages = []) {
+  if (!pages || pages.length === 0) return '';
+  const sorted = [...pages].sort((a, b) => a - b);
+  const ranges = [];
+  let start = sorted[0];
+  let prev = start;
+
+  for (let i = 1; i < sorted.length; i++) {
+    const cur = sorted[i];
+    if (cur === prev + 1) {
+      prev = cur;
+    } else {
+      ranges.push(start === prev ? `${start}` : `${start}-${prev}`);
+      start = cur;
+      prev = cur;
+    }
+  }
+  ranges.push(start === prev ? `${start}` : `${start}-${prev}`);
+  return ranges.join(', ');
+}
+
+/**
  * MergePdfPreview
  * 
  * Supports both embedded panel and popup modal views:
@@ -52,6 +106,8 @@ function toUint8Array(data) {
  * - files: Array of file objects
  * - activeFileIndex: number
  * - onSelectFile: (index) => void
+ * - onToggleExcludePage: (fileIndex, pageNum) => void
+ * - onUpdateExcludedPages: (fileIndex, pageNums) => void
  */
 export default function MergePdfPreview({
   files = [],
@@ -62,6 +118,8 @@ export default function MergePdfPreview({
   isOpen = true,
   onClose,
   initialMode = 'document',
+  onToggleExcludePage,
+  onUpdateExcludedPages,
 }) {
   const containerRef = useRef(null);
   const viewportRef = useRef(null);
@@ -82,6 +140,10 @@ export default function MergePdfPreview({
   const [pageInputVal, setPageInputVal] = useState('');
   const [showThumbnails, setShowThumbnails] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
+
+  // Page exclusion UI state
+  const [showRangeModal, setShowRangeModal] = useState(false);
+  const [rangeInputVal, setRangeInputVal] = useState('');
 
   // Loading & error state
   const [isLoading, setIsLoading] = useState(false);
@@ -157,14 +219,25 @@ export default function MergePdfPreview({
     ? sequenceMap[sequencePageNum - 1] || sequenceMap[0] || null
     : null;
 
+  const targetFileIndex = viewMode === 'sequence'
+    ? (activeSequenceItem?.fileIndex ?? selectedDocIndex)
+    : selectedDocIndex;
+
   const targetFile = viewMode === 'sequence'
-    ? activeSequenceItem?.file || currentFile
-    : currentFile;
+    ? (activeSequenceItem?.file || files[targetFileIndex] || currentFile)
+    : (files[targetFileIndex] || currentFile);
 
   const targetFilePath = targetFile?.path || targetFile?.filePath || '';
+  const isPdfTarget = targetFile?.extension?.toLowerCase() === '.pdf';
   const targetPageNum = viewMode === 'sequence'
-    ? activeSequenceItem?.docPage || 1
+    ? (activeSequenceItem?.docPage || 1)
     : docPageNum;
+
+  const currentExcludedList = useMemo(() => {
+    return targetFile?.excludedPages || [];
+  }, [targetFile?.excludedPages]);
+
+  const isCurrentPageExcluded = isPdfTarget && currentExcludedList.includes(targetPageNum);
 
   // Pre-load page counts for all PDF files
   useEffect(() => {
@@ -337,7 +410,57 @@ export default function MergePdfPreview({
     };
   }, [currentPdfDoc, targetPageNum, zoomLevel, rotation, targetFilePath]);
 
-  const maxDocPages = currentPdfDoc?.numPages || docPageCounts[currentFilePath] || 1;
+  const maxDocPages = currentPdfDoc?.numPages || docPageCounts[targetFilePath] || 1;
+
+  // Sync range input text when target file or excluded pages change
+  useEffect(() => {
+    setRangeInputVal(formatPageRanges(targetFile?.excludedPages || []));
+  }, [targetFileIndex, targetFile?.excludedPages]);
+
+  const handleToggleCurrentPage = useCallback(() => {
+    if (!isPdfTarget) return;
+    onToggleExcludePage?.(targetFileIndex, targetPageNum);
+  }, [isPdfTarget, onToggleExcludePage, targetFileIndex, targetPageNum]);
+
+  const handleApplyRangeInput = useCallback((e) => {
+    e?.preventDefault();
+    if (!isPdfTarget) return;
+    const parsed = parsePageRanges(rangeInputVal, maxDocPages);
+    onUpdateExcludedPages?.(targetFileIndex, parsed);
+  }, [isPdfTarget, rangeInputVal, maxDocPages, onUpdateExcludedPages, targetFileIndex]);
+
+  const handleExcludeEvens = useCallback(() => {
+    if (!isPdfTarget) return;
+    const evens = [];
+    for (let p = 2; p <= maxDocPages; p += 2) evens.push(p);
+    onUpdateExcludedPages?.(targetFileIndex, evens);
+  }, [isPdfTarget, maxDocPages, onUpdateExcludedPages, targetFileIndex]);
+
+  const handleExcludeOdds = useCallback(() => {
+    if (!isPdfTarget) return;
+    const odds = [];
+    for (let p = 1; p <= maxDocPages; p += 2) odds.push(p);
+    onUpdateExcludedPages?.(targetFileIndex, odds);
+  }, [isPdfTarget, maxDocPages, onUpdateExcludedPages, targetFileIndex]);
+
+  const handleClearExclusions = useCallback(() => {
+    if (!isPdfTarget) return;
+    onUpdateExcludedPages?.(targetFileIndex, []);
+  }, [isPdfTarget, onUpdateExcludedPages, targetFileIndex]);
+
+  // Overall totals across all files
+  const totalRawPages = useMemo(() => {
+    return files.reduce((acc, f) => {
+      const p = f.path || f.filePath || '';
+      return acc + (f.extension?.toLowerCase() === '.pdf' ? (docPageCounts[p] || 1) : 1);
+    }, 0);
+  }, [files, docPageCounts]);
+
+  const totalExcludedCount = useMemo(() => {
+    return files.reduce((acc, f) => acc + (f.excludedPages?.length || 0), 0);
+  }, [files]);
+
+  const totalFinalOutputPages = Math.max(0, totalRawPages - totalExcludedCount);
 
   const handlePrevPage = useCallback(() => {
     if (viewMode === 'sequence') setSequencePageNum(p => Math.max(1, p - 1));
@@ -396,8 +519,6 @@ export default function MergePdfPreview({
       ? 'Fit Page'
       : `${Math.round(zoomLevel * 100)}%`;
 
-  const totalMergedPages = Object.values(docPageCounts).reduce((acc, c) => acc + (c || 1), 0);
-
   if (isModal && !isOpen) return null;
   if (!isModal && files.length === 0) return null;
 
@@ -416,9 +537,14 @@ export default function MergePdfPreview({
               <span className="merge-preview-badge">
                 {files.length} document{files.length !== 1 ? 's' : ''}
               </span>
-              {totalMergedPages > 0 && (
+              {totalRawPages > 0 && (
                 <span className="merge-preview-badge pages">
-                  {totalMergedPages} page{totalMergedPages !== 1 ? 's' : ''} total
+                  {totalFinalOutputPages} / {totalRawPages} pages in merge
+                </span>
+              )}
+              {totalExcludedCount > 0 && (
+                <span className="merge-preview-badge badge-excluded-count" title={`${totalExcludedCount} page(s) removed from merge`}>
+                  {totalExcludedCount} removed
                 </span>
               )}
             </h3>
@@ -490,6 +616,7 @@ export default function MergePdfPreview({
                   const ext = file.extension?.toLowerCase();
                   const p = file.path || file.filePath || '';
                   const pageCount = docPageCounts[p];
+                  const excludedCount = file.excludedPages?.length || 0;
 
                   return (
                     <button
@@ -507,14 +634,21 @@ export default function MergePdfPreview({
                         {ext?.replace('.', '').toUpperCase()}
                       </span>
                       {ext === '.pdf' && pageCount && (
-                        <span className="pill-pages">{pageCount}p</span>
+                        <span className="pill-pages">
+                          {Math.max(0, pageCount - excludedCount)}p
+                        </span>
+                      )}
+                      {excludedCount > 0 && (
+                        <span className="pill-excluded-tag" title={`${excludedCount} page(s) removed`}>
+                          -{excludedCount}
+                        </span>
                       )}
                     </button>
                   );
                 })}
               </div>
             ) : (
-              <div className="merge-sequence-banner">
+              <div className={`merge-sequence-banner ${activeSequenceItem?.isPdf && (activeSequenceItem.file?.excludedPages || []).includes(activeSequenceItem.docPage) ? 'page-is-excluded' : ''}`}>
                 <span className="seq-step-badge">
                   Merged Page {sequencePageNum} of {totalSequencePages}
                 </span>
@@ -525,6 +659,11 @@ export default function MergePdfPreview({
                 <span className="seq-file-page-tag">
                   (Page {activeSequenceItem?.docPage} of {activeSequenceItem?.docTotalPages})
                 </span>
+                {activeSequenceItem?.isPdf && (activeSequenceItem.file?.excludedPages || []).includes(activeSequenceItem.docPage) && (
+                  <span className="seq-excluded-pill">
+                    <Icons.Trash2 /> Marked for Removal
+                  </span>
+                )}
               </div>
             )}
           </div>
@@ -656,6 +795,48 @@ export default function MergePdfPreview({
               </button>
             </div>
 
+            {/* Page Exclusion / Removal Actions */}
+            {isPdfTarget && (
+              <>
+                <div className="pdf-toolbar-divider" />
+                <div className="pdf-toolbar-group pdf-exclude-actions">
+                  <button
+                    type="button"
+                    className={`pdf-tb-btn btn-toggle-page-exclude ${isCurrentPageExcluded ? 'page-is-excluded' : ''}`}
+                    onClick={handleToggleCurrentPage}
+                    title={isCurrentPageExcluded ? `Restore page ${targetPageNum} to merged document` : `Remove page ${targetPageNum} from merged document`}
+                    id="btn-exclude-current-page"
+                  >
+                    {isCurrentPageExcluded ? (
+                      <>
+                        <Icons.RotateCcw />
+                        <span className="btn-exclude-label">Restore Page {targetPageNum}</span>
+                      </>
+                    ) : (
+                      <>
+                        <Icons.Trash2 />
+                        <span className="btn-exclude-label">Remove Page {targetPageNum}</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    className={`pdf-tb-btn btn-select-pages-trigger ${showRangeModal ? 'active' : ''}`}
+                    onClick={() => setShowRangeModal(v => !v)}
+                    title="Select specific pages to remove (enter ranges or pick pages)"
+                    id="btn-select-pages-trigger"
+                  >
+                    <Icons.Layers />
+                    <span>Select Pages</span>
+                    {currentExcludedList.length > 0 && (
+                      <span className="exclude-count-pill">{currentExcludedList.length}</span>
+                    )}
+                  </button>
+                </div>
+              </>
+            )}
+
             {isModal && (
               <div className="pdf-toolbar-group-right">
                 <button
@@ -668,6 +849,99 @@ export default function MergePdfPreview({
               </div>
             )}
           </div>
+
+          {/* Page Selection Drawer / Modal */}
+          {showRangeModal && isPdfTarget && (
+            <div className="page-selection-drawer">
+              <div className="page-selection-header">
+                <div className="drawer-title">
+                  <Icons.Layers />
+                  <span>Select Pages to Remove from <strong>{targetFile?.name}</strong></span>
+                </div>
+                <button
+                  type="button"
+                  className="drawer-close-btn"
+                  onClick={() => setShowRangeModal(false)}
+                  title="Close page selector"
+                >
+                  <Icons.X />
+                </button>
+              </div>
+
+              <div className="page-selection-body">
+                {/* Range Input Row */}
+                <form onSubmit={handleApplyRangeInput} className="page-range-form">
+                  <div className="range-input-wrapper">
+                    <label htmlFor="range-input-field">Page Numbers or Ranges to remove:</label>
+                    <div className="range-input-row">
+                      <input
+                        id="range-input-field"
+                        type="text"
+                        className="range-input"
+                        placeholder="e.g. 2, 4, 6-9"
+                        value={rangeInputVal}
+                        onChange={(e) => setRangeInputVal(e.target.value)}
+                      />
+                      <button type="submit" className="btn-apply-range">
+                        Apply
+                      </button>
+                    </div>
+                    <span className="range-hint">Enter comma-separated page numbers or ranges (e.g. 1, 3, 5-8).</span>
+                  </div>
+
+                  {/* Quick presets */}
+                  <div className="quick-preset-actions">
+                    <span className="preset-label">Quick Actions:</span>
+                    <button type="button" className="btn-preset" onClick={handleExcludeEvens}>
+                      Remove Even
+                    </button>
+                    <button type="button" className="btn-preset" onClick={handleExcludeOdds}>
+                      Remove Odd
+                    </button>
+                    <button type="button" className="btn-preset reset" onClick={handleClearExclusions}>
+                      Restore All Pages
+                    </button>
+                  </div>
+                </form>
+
+                {/* Visual Page Selector Grid */}
+                <div className="page-picker-section">
+                  <div className="picker-header">
+                    <span>Click any page chip below to toggle removal:</span>
+                    <span className="picker-summary">
+                      {currentExcludedList.length > 0 ? (
+                        <strong className="text-warning">{currentExcludedList.length} of {maxDocPages} pages marked for removal</strong>
+                      ) : (
+                        <span className="text-muted">All {maxDocPages} pages included</span>
+                      )}
+                    </span>
+                  </div>
+                  <div className="page-picker-grid">
+                    {Array.from({ length: maxDocPages }, (_, i) => i + 1).map((pg) => {
+                      const isExcluded = currentExcludedList.includes(pg);
+                      const isViewing = (viewMode === 'sequence' ? (activeSequenceItem?.docPage === pg) : (docPageNum === pg));
+                      return (
+                        <button
+                          key={`page-pick-${pg}`}
+                          type="button"
+                          className={`page-pick-chip ${isExcluded ? 'excluded' : 'included'} ${isViewing ? 'viewing' : ''}`}
+                          onClick={() => onToggleExcludePage?.(targetFileIndex, pg)}
+                          title={isExcluded ? `Page ${pg}: Marked for removal (Click to keep)` : `Page ${pg}: Included (Click to remove)`}
+                        >
+                          <span className="pick-num">{pg}</span>
+                          {isExcluded ? (
+                            <span className="pick-mark remove">✕</span>
+                          ) : (
+                            <span className="pick-mark keep">✓</span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* 4. Canvas Viewport Area */}
           <div className="merge-preview-viewport" ref={viewportRef}>
@@ -715,8 +989,27 @@ export default function MergePdfPreview({
 
             {/* Canvas Viewport */}
             {!loadingError && targetFile && targetFile.extension?.toLowerCase() === '.pdf' && (
-              <div className="merge-canvas-wrapper" ref={containerRef}>
-                <canvas ref={canvasRef} className="merge-pdf-canvas" />
+              <div className={`merge-canvas-wrapper ${isCurrentPageExcluded ? 'page-is-excluded' : ''}`} ref={containerRef}>
+                {isCurrentPageExcluded && (
+                  <div className="canvas-excluded-overlay-banner">
+                    <div className="banner-left">
+                      <div className="banner-badge">
+                        <Icons.Trash2 />
+                        <span>PAGE {targetPageNum} MARKED FOR REMOVAL</span>
+                      </div>
+                      <span className="banner-sub">This page will not be included in the merged document.</span>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn-restore-page-inline"
+                      onClick={handleToggleCurrentPage}
+                    >
+                      <Icons.RotateCcw />
+                      <span>Restore Page</span>
+                    </button>
+                  </div>
+                )}
+                <canvas ref={canvasRef} className={`merge-pdf-canvas ${isCurrentPageExcluded ? 'canvas-excluded-dim' : ''}`} />
               </div>
             )}
           </div>
@@ -728,44 +1021,83 @@ export default function MergePdfPreview({
                 {viewMode === 'sequence' ? (
                   sequenceMap.map((item, idx) => {
                     const isCurrent = idx === sequencePageNum - 1;
+                    const isExcluded = item.isPdf && (item.file?.excludedPages || []).includes(item.docPage);
                     return (
-                      <button
+                      <div
                         key={`thumb-seq-${idx}`}
-                        type="button"
-                        className={`thumb-card ${isCurrent ? 'active' : ''}`}
+                        className={`thumb-card ${isCurrent ? 'active' : ''} ${isExcluded ? 'is-excluded' : ''}`}
                         onClick={() => setSequencePageNum(idx + 1)}
-                        title={`Page ${idx + 1} (${item.file.name})`}
+                        title={`Page ${idx + 1} (${item.file.name})${isExcluded ? ' - Excluded from merge' : ''}`}
                       >
                         <div className="thumb-preview-box">
                           <Icons.PDF />
                           <span className="thumb-doc-idx">Doc {item.fileIndex + 1}</span>
+                          {item.isPdf && (
+                            <button
+                              type="button"
+                              className={`thumb-toggle-btn ${isExcluded ? 'is-excluded' : ''}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onToggleExcludePage?.(item.fileIndex, item.docPage);
+                              }}
+                              title={isExcluded ? `Restore doc ${item.fileIndex + 1} page ${item.docPage}` : `Remove doc ${item.fileIndex + 1} page ${item.docPage}`}
+                              aria-label={isExcluded ? `Restore page` : `Remove page`}
+                            >
+                              {isExcluded ? <Icons.RotateCcw /> : <Icons.Trash2 />}
+                            </button>
+                          )}
+                          {isExcluded && (
+                            <div className="thumb-excluded-flag">
+                              <span>EXCLUDED</span>
+                            </div>
+                          )}
                         </div>
                         <div className="thumb-caption">
-                          <span>p.{idx + 1}</span>
+                          <span className={isExcluded ? 'strikethrough-text' : ''}>p.{idx + 1}</span>
                           <span className="thumb-sub">({item.docPage}/{item.docTotalPages})</span>
                         </div>
-                      </button>
+                      </div>
                     );
                   })
                 ) : (
                   Array.from({ length: maxDocPages }, (_, i) => i + 1).map((pg) => {
                     const isCurrent = pg === docPageNum;
+                    const isExcluded = currentExcludedList.includes(pg);
                     return (
-                      <button
+                      <div
                         key={`thumb-doc-${pg}`}
-                        type="button"
-                        className={`thumb-card ${isCurrent ? 'active' : ''}`}
+                        className={`thumb-card ${isCurrent ? 'active' : ''} ${isExcluded ? 'is-excluded' : ''}`}
                         onClick={() => setDocPageNum(pg)}
-                        title={`Page ${pg}`}
+                        title={`Page ${pg}${isExcluded ? ' - Excluded from merge' : ''}`}
                       >
                         <div className="thumb-preview-box">
                           <Icons.PDF />
                           <span className="thumb-doc-idx">Page {pg}</span>
+                          {isPdfTarget && (
+                            <button
+                              type="button"
+                              className={`thumb-toggle-btn ${isExcluded ? 'is-excluded' : ''}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onToggleExcludePage?.(targetFileIndex, pg);
+                              }}
+                              title={isExcluded ? `Restore page ${pg}` : `Remove page ${pg}`}
+                              aria-label={isExcluded ? `Restore page` : `Remove page`}
+                            >
+                              {isExcluded ? <Icons.RotateCcw /> : <Icons.Trash2 />}
+                            </button>
+                          )}
+                          {isExcluded && (
+                            <div className="thumb-excluded-flag">
+                              <span>EXCLUDED</span>
+                            </div>
+                          )}
                         </div>
                         <div className="thumb-caption">
-                          <span>Page {pg}</span>
+                          <span className={isExcluded ? 'strikethrough-text' : ''}>Page {pg}</span>
+                          {isExcluded && <span className="thumb-sub-excluded">Removed</span>}
                         </div>
-                      </button>
+                      </div>
                     );
                   })
                 )}

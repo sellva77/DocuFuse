@@ -56,7 +56,9 @@ export default function App() {
       setFiles(prev => {
         // Deduplicate by path
         const existingPaths = new Set(prev.map(f => f.path));
-        const unique = newFiles.filter(f => !existingPaths.has(f.path) && !f.error);
+        const unique = newFiles
+          .filter(f => !existingPaths.has(f.path) && !f.error)
+          .map(f => ({ ...f, excludedPages: f.excludedPages || [] }));
         return [...prev, ...unique];
       });
     }
@@ -98,6 +100,33 @@ export default function App() {
     setOutputFormat(format);
   }, []);
 
+  // Toggle page exclusion for a file (1-based page number)
+  const handleToggleExcludePage = useCallback((fileIndex, pageNum) => {
+    setFiles(prev => {
+      if (fileIndex < 0 || fileIndex >= prev.length) return prev;
+      return prev.map((f, i) => {
+        if (i !== fileIndex) return f;
+        const currentExcluded = f.excludedPages || [];
+        const isExcluded = currentExcluded.includes(pageNum);
+        const updated = isExcluded
+          ? currentExcluded.filter(p => p !== pageNum)
+          : [...currentExcluded, pageNum].sort((a, b) => a - b);
+        return { ...f, excludedPages: updated };
+      });
+    });
+  }, []);
+
+  // Bulk update excluded pages for a file
+  const handleUpdateExcludedPages = useCallback((fileIndex, excludedPages) => {
+    setFiles(prev => {
+      if (fileIndex < 0 || fileIndex >= prev.length) return prev;
+      return prev.map((f, i) => {
+        if (i !== fileIndex) return f;
+        return { ...f, excludedPages: Array.isArray(excludedPages) ? excludedPages : [] };
+      });
+    });
+  }, []);
+
   // Merge & Export
   const handleMerge = useCallback(async () => {
     if (!window.electronAPI || files.length === 0) return;
@@ -112,6 +141,12 @@ export default function App() {
     try {
       const result = await window.electronAPI.mergeDocuments({
         filePaths: files.map(f => f.path),
+        files: files.map(f => ({
+          path: f.path,
+          filePath: f.path,
+          name: f.name,
+          excludedPages: f.excludedPages || [],
+        })),
         outputFormat,
         outputPath: saveResult.filePath,
       });
@@ -251,6 +286,8 @@ export default function App() {
             setActivePreviewIndex(idx);
             setPreviewModal(prev => ({ ...prev, fileIndex: idx }));
           }}
+          onToggleExcludePage={handleToggleExcludePage}
+          onUpdateExcludedPages={handleUpdateExcludedPages}
         />
       )}
 

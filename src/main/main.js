@@ -205,7 +205,7 @@ ipcMain.handle('dialog:saveFile', async (_event, format) => {
 });
 
 // Merge documents
-ipcMain.handle('documents:merge', async (_event, { filePaths, outputFormat, outputPath }) => {
+ipcMain.handle('documents:merge', async (_event, { filePaths, files: filesConfigs, outputFormat, outputPath }) => {
   // Validate inputs
   if (!Array.isArray(filePaths) || filePaths.length === 0) {
     return { success: false, error: 'No files provided' };
@@ -258,6 +258,7 @@ ipcMain.handle('documents:merge', async (_event, { filePaths, outputFormat, outp
 
     await processFiles({
       filePaths,
+      files: filesConfigs,
       outputFormat,
       outputPath: outputNormalized,
       tempDir,

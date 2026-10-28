@@ -51,10 +51,13 @@ export default function PdfSignatureCanvas({
   onPlacementChange,
   placement,
   disabled = false,
-  signerName = 'Authorized Signer',
+  signerName = '',
   reason = '',
+  location = '',
   onApplyToAll,
   hasMultipleDocs = false,
+  customAppearance = null,
+  onOpenCustomizeAppearance,
 }) {
   const containerRef = useRef(null);
   const canvasRef = useRef(null);
@@ -318,7 +321,7 @@ export default function PdfSignatureCanvas({
       const newX = Math.round(centerX - clampedW / 2);
       const newY = Math.round(centerY - clampedH / 2);
 
-      const clamped = clampRectToBounds({ x: newX, y: newY, width: clampedW, height: clampedH }, viewportDims, 20);
+      const clamped = clampRectToBounds({ x: newX, y: newY, width: clampedW, height: clampedH }, viewportDims, 5);
 
       const norm = screenToNormalized(clamped, viewportDims.width, viewportDims.height);
       onPlacementChange?.({
@@ -405,8 +408,8 @@ export default function PdfSignatureCanvas({
 
       setSigRect(curr => {
         let finalRect = curr;
-        // If single click without drag, drop a standard Medium rectangle centered at click point
-        if (!finalRect || (finalRect.width <= 15 && finalRect.height <= 10)) {
+        // If single click without drag (almost zero size), drop a standard Medium rectangle centered at click point
+        if (!finalRect || (finalRect.width <= 5 && finalRect.height <= 5)) {
           if (start && viewportDims.width > 0) {
             const stdW = Math.min(200, Math.floor(viewportDims.width * 0.35));
             const stdH = Math.min(70, Math.floor(viewportDims.height * 0.12));
@@ -419,8 +422,8 @@ export default function PdfSignatureCanvas({
           }
         }
 
-        if (finalRect && finalRect.width > 20 && finalRect.height > 15) {
-          const clamped = clampRectToBounds(finalRect, viewportDims, 20);
+        if (finalRect && finalRect.width >= 5 && finalRect.height >= 5) {
+          const clamped = clampRectToBounds(finalRect, viewportDims, 5);
           setPlacingMode(false);
 
           const norm = screenToNormalized(clamped, viewportDims.width, viewportDims.height);
@@ -478,7 +481,7 @@ export default function PdfSignatureCanvas({
         newRect = computeResizedRect(origRect, mode, dx, dy);
       }
 
-      const clamped = clampRectToBounds(newRect, viewportDims, 20);
+      const clamped = clampRectToBounds(newRect, viewportDims, 5);
       setSigRect(clamped);
     };
 
@@ -732,6 +735,25 @@ export default function PdfSignatureCanvas({
           </button>
         </div>
 
+        {/* Customize Signature Appearance button */}
+        {onOpenCustomizeAppearance && (
+          <>
+            <div className="pdf-toolbar-divider" />
+            <div className="pdf-toolbar-group">
+              <button
+                type="button"
+                className="pdf-tb-btn btn-customize-sig-appearance"
+                onClick={onOpenCustomizeAppearance}
+                title="Customize Signature Appearance (Adobe Acrobat Style)"
+                id="btn-tb-customize-appearance"
+              >
+                <Icons.Palette />
+                <span>Appearance</span>
+              </button>
+            </div>
+          </>
+        )}
+
         {/* Signature Size adjustment controls (when placed) */}
         {sigRect && (
           <>
@@ -865,15 +887,140 @@ export default function PdfSignatureCanvas({
                   title="Right-click for options (Apply to All Documents, Center, Delete)"
                   id="pdf-sig-rect"
                 >
-                  <div className="pdf-sig-rect-content">
-                    <div className="pdf-sig-rect-header">Digitally signed by</div>
-                    <div className="pdf-sig-rect-signer" title={signerName}>
-                      {signerName}
-                    </div>
-                    <div className="pdf-sig-rect-date">
-                      Date: {new Date().toLocaleDateString(undefined, { year: 'numeric', month: '2-digit', day: '2-digit' })} {new Date().toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                    </div>
-                  </div>
+                  {/* Main rectangle content with full appearance customizability */}
+                  {(() => {
+                    const fields = customAppearance?.customFields || {};
+                    const styling = customAppearance?.styling || {};
+                    const inkColor = styling.inkColor || '#000000';
+
+                    const signerSource = fields.signerNameSource || 'certificate';
+                    let activeSigner = '';
+                    if (signerSource === 'none') {
+                      activeSigner = '';
+                    } else if (signerSource === 'custom') {
+                      activeSigner = fields.signerName || signerName || '';
+                    } else {
+                      activeSigner = signerName || fields.signerName || '';
+                    }
+
+                    let activePrefix = fields.signPrefix;
+                    if (activePrefix === '__custom__') {
+                      activePrefix = fields.signPrefixCustom || '';
+                    } else if (activePrefix === undefined) {
+                      activePrefix = 'Digitally signed by';
+                    }
+
+                    const showSignerName = (customAppearance?.includeText ? customAppearance.includeText.name !== false : true) &&
+                      signerSource !== 'none' &&
+                      Boolean(activeSigner);
+
+                    const activeDn = fields.distinguishedName || (activeSigner ? `cn=${activeSigner}` : '');
+                    const activeReason = fields.reason !== undefined ? fields.reason : (reason || 'Document signature and certification');
+                    const activeLocation = fields.location !== undefined ? fields.location : (location || 'Office');
+                    const activeVersion = fields.versionText || 'DocuFuse 1.0.0';
+                    const showLabels = customAppearance?.includeText?.labels !== false;
+
+                    const padTwo = (n) => String(n).padStart(2, '0');
+                    const d = new Date();
+                    const tzOffsetMin = -d.getTimezoneOffset();
+                    const sign = tzOffsetMin >= 0 ? '+' : '-';
+                    const tzHours = padTwo(Math.floor(Math.abs(tzOffsetMin) / 60));
+                    const tzMins = padTwo(Math.abs(tzOffsetMin) % 60);
+                    const tzStr = `${sign}${tzHours}'${tzMins}'`;
+                    let dateDisplay = `${d.getFullYear()}.${padTwo(d.getMonth() + 1)}.${padTwo(d.getDate())} ${padTwo(d.getHours())}:${padTwo(d.getMinutes())}:${padTwo(d.getSeconds())} ${tzStr}`;
+                    if (fields.dateFormat === 'date_only') {
+                      dateDisplay = `${d.getFullYear()}.${padTwo(d.getMonth() + 1)}.${padTwo(d.getDate())}`;
+                    } else if (fields.dateFormat === 'iso') {
+                      dateDisplay = d.toISOString();
+                    }
+
+                    return (
+                      <div
+                        className={`pdf-sig-rect-content ${customAppearance?.textDirection && customAppearance.textDirection !== 'auto' ? `align-${customAppearance.textDirection}` : ''} border-${styling.borderStyle || 'solid'}`}
+                        style={{
+                          color: inkColor,
+                          backgroundColor: styling.backgroundColor || '#ffffff',
+                          position: 'relative',
+                        }}
+                      >
+                        {/* Optional subtle watermark logo */}
+                        {customAppearance?.includeText?.logo && fields.logoPosition === 'watermark' && (
+                          <div className="adobe-preview-watermark-overlay" style={{ opacity: 0.1 }}>
+                            {fields.customLogoDataUrl ? (
+                              <img src={fields.customLogoDataUrl} alt="Watermark" className="watermark-img" />
+                            ) : (
+                              <Icons.ShieldCheck />
+                            )}
+                          </div>
+                        )}
+
+                        {/* Graphic Side */}
+                        {customAppearance?.graphicType && customAppearance.graphicType !== 'none' && (
+                          <div className="pdf-sig-rect-graphic">
+                            {customAppearance.graphicType === 'draw' && customAppearance.drawnDataUrl && (
+                              <img src={customAppearance.drawnDataUrl} alt="Signature" className="rect-graphic-img" />
+                            )}
+                            {customAppearance.graphicType === 'image' && customAppearance.imageDataUrl && (
+                              <img src={customAppearance.imageDataUrl} alt="Seal" className="rect-graphic-img" />
+                            )}
+                            {customAppearance.graphicType === 'text' && (
+                              <div
+                                className={`rect-graphic-text style-${customAppearance.textStyle || 'script'}`}
+                                style={{ color: inkColor }}
+                              >
+                                {(customAppearance.textSignature && customAppearance.textSignature !== 'Authorized Signer')
+                                  ? customAppearance.textSignature
+                                  : (activeSigner || signerName || '')}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        <div className="pdf-sig-rect-text-col">
+                          {showSignerName && (
+                            <div className="pdf-sig-rect-header" style={{ color: inkColor }}>
+                              {activePrefix ? `${activePrefix} ` : ''}{activeSigner}
+                            </div>
+                          )}
+                          {customAppearance?.includeText?.distinguishedName && activeDn && (
+                            <div className="pdf-sig-rect-detail">
+                              {showLabels ? 'DN: ' : ''}{activeDn}
+                            </div>
+                          )}
+                          {(customAppearance?.includeText ? customAppearance.includeText.date : true) && (
+                            <div className="pdf-sig-rect-date">
+                              {showLabels ? 'Date: ' : ''}{dateDisplay}
+                            </div>
+                          )}
+                          {customAppearance?.includeText?.reason && (
+                            <div className="pdf-sig-rect-detail">
+                              {showLabels ? 'Reason: ' : ''}{activeReason}
+                            </div>
+                          )}
+                          {customAppearance?.includeText?.location && (
+                            <div className="pdf-sig-rect-detail">
+                              {showLabels ? 'Location: ' : ''}{activeLocation}
+                            </div>
+                          )}
+                          {customAppearance?.includeText?.adobeVersion && (
+                            <div className="pdf-sig-rect-detail">
+                              {showLabels ? 'Version: ' : ''}{activeVersion}
+                            </div>
+                          )}
+                          {customAppearance?.includeText?.logo && fields.logoPosition === 'badge' && (
+                            <div className="pdf-sig-rect-badge" style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '9px', fontWeight: 600, opacity: 0.85, marginTop: '2px' }}>
+                              {fields.customLogoDataUrl ? (
+                                <img src={fields.customLogoDataUrl} alt="Logo" style={{ width: '12px', height: '12px', objectFit: 'contain' }} />
+                              ) : (
+                                <Icons.ShieldCheck />
+                              )}
+                              <span>Certified Digital Signature</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
                   <div className="pdf-sig-rect-dims">{rectInfoText}</div>
 
                   {/* Top-right action controls: apply all, decrease size, increase size, delete */}
@@ -995,6 +1142,23 @@ export default function PdfSignatureCanvas({
               <span>Align horizontally in middle</span>
             </div>
           </button>
+          {onOpenCustomizeAppearance && (
+            <button
+              type="button"
+              className="pdf-ctx-item"
+              onClick={() => {
+                setContextMenu(null);
+                onOpenCustomizeAppearance();
+              }}
+              id="ctx-customize-appearance"
+            >
+              <Icons.Palette />
+              <div className="pdf-ctx-text">
+                <strong>Customize Appearance...</strong>
+                <span>Graphic, text fields & layout</span>
+              </div>
+            </button>
+          )}
           <div className="pdf-ctx-divider" />
           <button
             type="button"
